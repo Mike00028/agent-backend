@@ -1,0 +1,112 @@
+# ─── Go ──────────────────────────────────────────────────────────────────────
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work.sum
+go.sum
+
+# Vendor directory (if using go mod vendor)
+vendor/
+
+# Build artifacts
+/golang/services/api/cmd/main
+/golang/services/*/bin/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Poetry
+poetry.lock
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# ─── IDE & Editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Generated Code ───────────────────────────────────────────────────────────
+# Leave proto generated files in git (they're part of the source)
+# but ignore build artifacts
+/golang/services/api/internal/langgraphv1/langgraph/v1/*.pb.go
+/golang/services/api/internal/langgraphv1/langgraph/v1/*_grpc.pb.go
+/python/gen/langgraph/v1/*_pb2.py
+/python/gen/langgraph/v1/*_pb2.pyi
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+*.bak

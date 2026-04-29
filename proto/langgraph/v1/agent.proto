@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package langgraph.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/mike00028/golang-backend/services/api/internal/langgraphv1";
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+message AgentRequest {
+  string session_id                    = 1;
+  string message                       = 2;
+  google.protobuf.Struct options       = 3;
+  string model                         = 4;  // optional: which LLM/graph to use (defaults to "default-chat")
+}
+
+// Tool call emitted by the LLM node
+message ToolCall {
+  string id         = 1;
+  string name       = 2;
+  string args_json  = 3;  // serialized tool arguments
+}
+
+// Result from tool execution
+message ToolResult {
+  string tool_call_id = 1;
+  string content      = 2;  // tool output
+}
+
+// Metadata for streaming events
+message EventMetadata {
+  int64 timestamp_ms          = 1;  // milliseconds since epoch
+  string node_name            = 2;  // which graph node emitted this
+  string thinking             = 3;  // agent reasoning/analysis
+}
+
+// Metadata for unary response
+message ResponseMetadata {
+  string session_id           = 1;
+  string model                = 2;
+  int32 tool_calls_count      = 3;
+  int64 execution_time_ms     = 4;
+}
+
+// Streaming event from the agent graph
+message AgentEvent {
+  string event_type           = 1;  // "tool_call" | "tool_result" | "text" | "error" | "message" | "thinking"
+  EventMetadata metadata      = 2;  // event context (timestamp, node, thinking)
+  
+  oneof content {
+    string text        = 3;  // text chunk or final response
+    string error       = 4;  // error message
+    ToolCall tool_call = 5;  // LLM emitted a tool call
+    ToolResult tool_result = 6;  // tool execution result
+    string message     = 7;  // intermediate message
+  }
+}
+
+// Unary response (single text response, no streaming)
+message AgentResponse {
+  ResponseMetadata metadata   = 1;  // response context (session, model, counts)
+  
+  oneof result {
+    string text  = 2;
+    string error = 3;
+  }
+}
+
+// ─── Service ─────────────────────────────────────────────────────────────────
+
+service AgentService {
+  // Unary: full response in one shot (blocks until done)
+  rpc RunAgent (AgentRequest) returns (AgentResponse);
+
+  // Server-streaming: stream all events (tool calls, results, text) back in real-time
+  rpc StreamAgent (AgentRequest) returns (stream AgentEvent);
+}
