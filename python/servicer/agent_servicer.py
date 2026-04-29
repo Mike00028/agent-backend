@@ -10,48 +10,42 @@ Includes metadata: timestamp_ms, node_name, thinking.
 
 import asyncio
 import json
-import sys
 import os
+import sys
 import time
-
-# Make generated stubs importable (../gen)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gen"))
+import uuid
+from typing import cast
 
 import grpc
-from langgraph.v1 import agent_pb2, agent_pb2_grpc
-from agents.chat.graph import build_graph as build_chat_graph
-from agents.rag.graph import build_graph as build_rag_graph
+
+# Generated grpc stubs import from "langgraph.v1", so expose python/gen on sys.path.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gen"))
+
+from langgraph.v1 import agent_pb2, agent_pb2_grpc  # type: ignore[import-not-found]
+from agents.router.graph import RouterState, build_graph as build_router_graph
+from agents.rag.retriever import InMemoryEmbeddingRetriever
 from config import load
+from providers import LLMProvider
 
 _cfg = load()
 _semaphore = asyncio.Semaphore(_cfg.grpc_max_concurrent)
 
-# Build graphs once at import time (thread/async safe after compilation)
-_graphs = {
-    "chat": build_chat_graph(),
-    "rag": build_rag_graph(),
-}
+_llm_provider_registry = LLMProvider(_cfg)
+_chat_provider = _llm_provider_registry.create_chat_provider()
+_embedding_provider = _llm_provider_registry.create_embedding_provider()
+_retriever = InMemoryEmbeddingRetriever(
+    embedding_provider=_embedding_provider,
+    embedding_model=_cfg.embedding_model,
+    documents=_cfg.rag_seed_documents,
+    top_k=_cfg.rag_top_k,
+)
 
-
-def _select_graph(message: str, options: dict):
-    """Select graph using explicit 'graph_type' option or lightweight query heuristics."""
-    if not options:
-        options = {}
-    
-    # Check for explicit graph_type option
-    if isinstance(options, dict):
-        graph_type = options.get("graph_type", "").lower()
-        if graph_type == "rag":
-            return _graphs["rag"]
-        elif graph_type == "chat":
-            return _graphs["chat"]
-    
-    # Heuristic: check message content for RAG-related keywords
-    msg = (message or "").lower()
-    rag_hints = ("document", "docs", "knowledge base", "search", "retrieve", "citation", "context")
-    if any(h in msg for h in rag_hints):
-        return _graphs["rag"]
-    return _graphs["chat"]
+# Single supervisor graph — routes to chat / rag / math internally via conditional edges.
+_graph = build_router_graph(
+    chat_provider=_chat_provider,
+    retriever=_retriever,
+    default_model=_cfg.llm_model,
+)
 
 
 class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
@@ -63,23 +57,29 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> agent_pb2.AgentResponse:
         """Unary: wait for graph to complete, return final result with metadata."""
-        if not request.session_id:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session_id required")
+        if not _is_valid_uuid(request.session_id):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session_id must be a valid UUID")
 
-        graph = _select_graph(request.message, dict(request.options) if request.options else {})
-        model = request.model or "default-chat"
+        options = dict(request.options) if request.options else {}
+        model = _resolve_model(request.model)
 
         async with _semaphore:
             try:
                 start_time = time.time()
                 tool_calls_count = 0
-                
-                state = {
+
+                state = cast(RouterState, {
                     "session_id": request.session_id,
                     "messages": [{"role": "user", "content": request.message}],
+                    "model": model,
+                    "options": options,
+                    "route": "",
+                    "retrieved_context": "",
                     "result": "",
-                }
-                output = await graph.ainvoke(state)
+                    "tool_calls": [],
+                    "tool_results": [],
+                })
+                output = await _graph.ainvoke(state)
                 
                 # Count tool calls from output if available
                 if "tool_calls" in output:
@@ -107,21 +107,28 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
         context: grpc.aio.ServicerContext,
     ):
         """Stream: yield events as graph executes with metadata (timestamp, node_name, thinking)."""
-        if not request.session_id:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session_id required")
+        if not _is_valid_uuid(request.session_id):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session_id must be a valid UUID")
 
-        graph = _select_graph(request.message, dict(request.options) if request.options else {})
+        options = dict(request.options) if request.options else {}
+        model = _resolve_model(request.model)
 
         async with _semaphore:
             try:
-                state = {
+                state = cast(RouterState, {
                     "session_id": request.session_id,
                     "messages": [{"role": "user", "content": request.message}],
+                    "model": model,
+                    "options": options,
+                    "route": "",
+                    "retrieved_context": "",
                     "result": "",
-                }
-                
+                    "tool_calls": [],
+                    "tool_results": [],
+                })
+
                 # Stream graph events
-                async for event in graph.astream(state):
+                async for event in _graph.astream(state):
                     # event is {node_name: node_output}
                     for node_name, node_output in event.items():
                         # Get current timestamp in milliseconds
@@ -195,3 +202,22 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                             )
             except Exception as exc:
                 await context.abort(grpc.StatusCode.INTERNAL, str(exc))
+
+
+def _is_valid_uuid(session_id: str) -> bool:
+    if not session_id:
+        return False
+    try:
+        uuid.UUID(session_id)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_model(request_model: str) -> str:
+    candidate = (request_model or "").strip()
+    if not candidate:
+        return _cfg.llm_model
+    if candidate.lower() in {"default-chat", "default", "chat"}:
+        return _cfg.llm_model
+    return candidate

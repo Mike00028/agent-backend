@@ -2,17 +2,22 @@
 
 import asyncio
 import logging
-import sys
 import os
 import platform
+import sys
 
 import grpc
 import grpc.aio
 
 # uvloop only works on Unix/Linux
+uvloop = None
 if platform.system() != "Windows":
-    import uvloop
+    try:
+        import uvloop  # type: ignore
+    except ImportError:
+        uvloop = None
 
+# Generated grpc stubs import from "langgraph.v1", so expose python/gen on sys.path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gen"))
 
 from langgraph.v1 import agent_pb2_grpc
@@ -40,6 +45,6 @@ async def serve() -> None:
 
 
 if __name__ == "__main__":
-    if platform.system() != "Windows":
+    if uvloop is not None:
         uvloop.install()
     asyncio.run(serve())
