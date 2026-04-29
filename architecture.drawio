@@ -1,0 +1,192 @@
+<mxfile host="app.diagrams.net" modified="2026-04-30T00:00:00.000Z" agent="GitHub Copilot" version="24.7.17" editor="draw.io">
+  <diagram id="agent-backend-flow" name="Agent Backend Flow">
+    <mxGraphModel dx="1800" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Row 1: Request / response path (y=300) -->
+
+        <mxCell id="client" value="&lt;b&gt;Client&lt;/b&gt;&lt;br/&gt;Web / Mobile / CLI"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="320" width="200" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="go_api" value="&lt;b&gt;Go API Gateway&lt;/b&gt;&lt;br/&gt;Gin · SSE · Auth · Rate Limit"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="340" y="300" width="260" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="grpc_pool" value="&lt;b&gt;gRPC Client Pool&lt;/b&gt;&lt;br/&gt;round-robin connections"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="680" y="320" width="240" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="python_srv" value="&lt;b&gt;Python LangGraph gRPC Service&lt;/b&gt;&lt;br/&gt;AgentServicer · Graph Routing"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="1000" y="300" width="300" height="120" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 2: Orchestrator + graph nodes (y=500) -->
+
+        <mxCell id="graph_orchestrator" value="&lt;b&gt;Graph Orchestrator&lt;/b&gt;&lt;br/&gt;route by options + intent"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="1000" y="490" width="300" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="chat_graph" value="&lt;b&gt;Chat Graph&lt;/b&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="880" y="640" width="150" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="rag_graph" value="&lt;b&gt;RAG Graph&lt;/b&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="1070" y="640" width="150" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hitl_graph" value="&lt;b&gt;HITL Graph&lt;/b&gt; (future)"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="1260" y="640" width="160" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Knowledge Base: right side, row 2 -->
+
+        <mxCell id="kb" value="&lt;b&gt;Knowledge Base&lt;/b&gt;&lt;br/&gt;Documents · Facts · Search Results"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="1470" y="490" width="280" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 3: Data stores (y=800) - spaced to avoid overlap -->
+
+        <mxCell id="sqlite" value="&lt;b&gt;SQLite&lt;/b&gt;&lt;br/&gt;Conversational Memory"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="800" width="240" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="pgvector" value="&lt;b&gt;PostgreSQL + pgvector&lt;/b&gt;&lt;br/&gt;Workflow · Toolbox · Entity · Summary"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="380" y="800" width="320" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="kb_store" value="&lt;b&gt;Knowledge Base Store&lt;/b&gt;&lt;br/&gt;Documents · Facts"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="780" y="800" width="260" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="tool_log" value="&lt;b&gt;Tool Log Store&lt;/b&gt;&lt;br/&gt;PostgreSQL or SQLite · audit"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;"
+          vertex="1" parent="1">
+          <mxGeometry x="1120" y="800" width="280" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- ── Edges: request path ── -->
+
+        <mxCell id="req" value="HTTP POST /api/v1/chat/stream"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;fontSize=11;"
+          edge="1" parent="1" source="client" target="go_api">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="to_pool" value="AgentRequest (options as Struct)"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;fontSize=11;"
+          edge="1" parent="1" source="go_api" target="grpc_pool">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="grpc_call" value="gRPC StreamAgent / RunAgent"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;fontSize=11;"
+          edge="1" parent="1" source="grpc_pool" target="python_srv">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="events_back" value="AgentEvent stream (text, tool_call, thinking)"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;fontSize=11;exitX=0.5;exitY=0;entryX=0.5;entryY=0;"
+          edge="1" parent="1" source="python_srv" target="go_api">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1150" y="220"/>
+              <mxPoint x="470" y="220"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="sse_back" value="SSE / JSON response"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;fontSize=11;exitX=0;exitY=0.5;entryX=1;entryY=0.5;"
+          edge="1" parent="1" source="go_api" target="client">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ── Edges: graph routing ── -->
+
+        <mxCell id="route_graph" value="route"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;fontSize=11;"
+          edge="1" parent="1" source="python_srv" target="graph_orchestrator">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="to_chat" value="chat"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;fontSize=11;"
+          edge="1" parent="1" source="graph_orchestrator" target="chat_graph">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="to_rag" value="rag"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;fontSize=11;"
+          edge="1" parent="1" source="graph_orchestrator" target="rag_graph">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="to_hitl" value="hitl"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;fontSize=11;"
+          edge="1" parent="1" source="graph_orchestrator" target="hitl_graph">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="rag_kb" value="retrieve context"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;fontSize=11;"
+          edge="1" parent="1" source="rag_graph" target="kb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ── Edges: data stores ── -->
+
+        <mxCell id="chat_history" value="read/write thread history"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;fontSize=11;"
+          edge="1" parent="1" source="chat_graph" target="sqlite">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="summary_store" value="store summaries/entities"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#666666;fontSize=11;"
+          edge="1" parent="1" source="graph_orchestrator" target="pgvector">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="rag_vector" value="semantic search"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;fontSize=11;"
+          edge="1" parent="1" source="rag_graph" target="kb_store">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="tool_audit" value="persist tool I/O logs"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;fontSize=11;"
+          edge="1" parent="1" source="graph_orchestrator" target="tool_log">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
