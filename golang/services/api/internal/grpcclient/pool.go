@@ -28,7 +28,7 @@ func New(size int) (*Pool, error) {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second, // Ping every 30s (less aggressive)
+			Time:                120 * time.Second, // Ping every 2 min for long-running streams
 			Timeout:             10 * time.Second,
 			PermitWithoutStream: false, // Don't ping when no active RPC
 		}),

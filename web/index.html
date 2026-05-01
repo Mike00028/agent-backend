@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LangGraph Chat Stream</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=IBM+Plex+Serif:wght@400;600&display=swap"
+    />
+    <style>
+      :root {
+        --bg-1: #0b1220;
+        --bg-2: #1d2a3a;
+        --accent: #ffb454;
+        --accent-2: #6de4ff;
+        --text: #e9f1f7;
+        --muted: #9fb2c3;
+        --card: rgba(15, 24, 36, 0.78);
+        --border: rgba(255, 255, 255, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", "IBM Plex Serif", serif;
+        color: var(--text);
+        background: radial-gradient(circle at top left, #203147 0%, var(--bg-1) 45%),
+          radial-gradient(circle at 10% 90%, #2b1a3a 0%, transparent 45%),
+          linear-gradient(135deg, var(--bg-1), var(--bg-2));
+        min-height: 100vh;
+      }
+
+      .page {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 20px 80px;
+        display: grid;
+        gap: 24px;
+        animation: fade-in 0.6s ease-out;
+      }
+
+      header {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 4vw, 40px);
+        letter-spacing: -0.02em;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 20px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 18px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(12px);
+      }
+
+      label {
+        display: block;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        background: rgba(10, 15, 25, 0.7);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 12px 14px;
+        border-radius: 12px;
+        font-family: inherit;
+        font-size: 14px;
+      }
+
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+
+      .row {
+        display: grid;
+        gap: 12px;
+      }
+
+      .row.split {
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      }
+
+      button {
+        background: linear-gradient(120deg, var(--accent), #ffd36a);
+        color: #1a1c1f;
+        border: none;
+        padding: 12px 18px;
+        border-radius: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        box-shadow: 0 10px 20px rgba(255, 180, 84, 0.25);
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 16px 30px rgba(255, 180, 84, 0.35);
+      }
+
+      .secondary {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+        box-shadow: none;
+      }
+
+      .output {
+        display: grid;
+        gap: 16px;
+      }
+
+      .bubble {
+        padding: 14px 16px;
+        border-radius: 14px;
+        background: rgba(19, 30, 44, 0.8);
+        border: 1px solid var(--border);
+        font-family: "IBM Plex Serif", serif;
+        white-space: pre-wrap;
+      }
+
+      .log {
+        max-height: 260px;
+        overflow: auto;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .log-entry {
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .status {
+        font-size: 13px;
+        color: var(--accent-2);
+      }
+
+      @keyframes fade-in {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (max-width: 720px) {
+        .page {
+          padding: 24px 16px 60px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <h1>LangGraph Stream Console</h1>
+        <p>Test the /chat SSE stream and watch each event arrive live.</p>
+      </header>
+
+      <section class="grid">
+        <div class="card">
+          <div class="row split">
+            <div>
+              <label for="baseUrl">Base URL</label>
+              <input id="baseUrl" value="http://localhost:8080" />
+            </div>
+            <div>
+              <label for="sessionId">Session ID</label>
+              <input id="sessionId" value="a3be0961-d3f2-4b9c-9375-a0c3d90d3f3b" placeholder="UUID (optional)" />
+            </div>
+            <div>
+              <label for="model">Model</label>
+              <input id="model" value="default-chat" />
+            </div>
+          </div>
+
+          <div class="row" style="margin-top: 16px">
+            <div>
+              <label for="message">Message</label>
+              <textarea id="message">who is monalisa? what is 61+6 and 35+45</textarea>
+            </div>
+          </div>
+
+          <div class="row split" style="margin-top: 16px">
+            <button id="sendBtn">Stream Chat</button>
+            <button id="clearBtn" class="secondary">Clear Output</button>
+          </div>
+        </div>
+
+        <div class="card output">
+          <div>
+            <label>Live Answer</label>
+            <div id="answer" class="bubble"></div>
+          </div>
+          <div>
+            <label>Event Log</label>
+            <div id="log" class="log"></div>
+          </div>
+          <div class="status" id="status">Idle</div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const baseUrlEl = document.getElementById("baseUrl");
+      const sessionIdEl = document.getElementById("sessionId");
+      const modelEl = document.getElementById("model");
+      const messageEl = document.getElementById("message");
+      const answerEl = document.getElementById("answer");
+      const logEl = document.getElementById("log");
+      const statusEl = document.getElementById("status");
+      const sendBtn = document.getElementById("sendBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      function addLog(text) {
+        const entry = document.createElement("div");
+        entry.className = "log-entry";
+        entry.textContent = text;
+        logEl.prepend(entry);
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function resetOutput() {
+        answerEl.textContent = "";
+        logEl.innerHTML = "";
+      }
+
+      async function streamChat() {
+        resetOutput();
+        setStatus("Connecting...");
+
+        const url = `${baseUrlEl.value.replace(/\/$/, "")}/chat`;
+        const payload = {
+          message: messageEl.value.trim(),
+          session_id: sessionIdEl.value.trim(),
+          model: modelEl.value.trim(),
+          options: {},
+          stream: true,
+        };
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok || !response.body) {
+          setStatus(`Request failed: ${response.status}`);
+          addLog(`HTTP ${response.status}`);
+          return;
+        }
+
+        setStatus("Streaming...");
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let eventName = "message";
+        let dataLines = [];
+
+        function flushEvent() {
+          if (!dataLines.length) {
+            return;
+          }
+          const data = dataLines.join("\n");
+          dataLines = [];
+
+          if (data.startsWith("{")) {
+            try {
+              const parsed = JSON.parse(data);
+              const eventType = parsed.event_type || eventName;
+              addLog(`[${eventType}] ${data}`);
+              if (parsed.text) {
+                answerEl.textContent += parsed.text + "\n";
+              }
+              if (parsed.message) {
+                answerEl.textContent += parsed.message + "\n";
+              }
+              if (parsed.error) {
+                addLog(`ERROR: ${parsed.error}`);
+                setStatus("Error");
+              }
+            } catch (err) {
+              addLog(`[${eventName}] ${data}`);
+            }
+          } else {
+            addLog(`[${eventName}] ${data}`);
+          }
+
+          if (eventName === "done") {
+            setStatus("Done");
+          }
+        }
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            flushEvent();
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+
+          while (buffer.includes("\n")) {
+            const lineEnd = buffer.indexOf("\n");
+            const line = buffer.slice(0, lineEnd).replace(/\r$/, "");
+            buffer = buffer.slice(lineEnd + 1);
+
+            if (line === "") {
+              flushEvent();
+              eventName = "message";
+              continue;
+            }
+
+            if (line.startsWith("event:")) {
+              eventName = line.slice(6).trim();
+              continue;
+            }
+
+            if (line.startsWith("data:")) {
+              dataLines.push(line.slice(5).trim());
+            }
+          }
+        }
+      }
+
+      sendBtn.addEventListener("click", () => {
+        streamChat().catch((err) => {
+          setStatus("Failed");
+          addLog(`Exception: ${err.message}`);
+        });
+      });
+
+      clearBtn.addEventListener("click", () => {
+        resetOutput();
+        setStatus("Idle");
+      });
+    </script>
+  </body>
+</html>

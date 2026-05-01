@@ -46,6 +46,11 @@ class AgentServiceStub(object):
                 request_serializer=langgraph_dot_v1_dot_agent__pb2.AgentRequest.SerializeToString,
                 response_deserializer=langgraph_dot_v1_dot_agent__pb2.AgentEvent.FromString,
                 _registered_method=True)
+        self.ExecuteTask = channel.unary_stream(
+                '/langgraph.v1.AgentService/ExecuteTask',
+                request_serializer=langgraph_dot_v1_dot_agent__pb2.TaskRequest.SerializeToString,
+                response_deserializer=langgraph_dot_v1_dot_agent__pb2.TaskEvent.FromString,
+                _registered_method=True)
 
 
 class AgentServiceServicer(object):
@@ -54,14 +59,20 @@ class AgentServiceServicer(object):
     """
 
     def RunAgent(self, request, context):
-        """Unary: full response in one shot (blocks until done)
+        """Legacy: kept for backward compatibility
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def StreamAgent(self, request, context):
-        """Server-streaming: stream all events (tool calls, results, text) back in real-time
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteTask(self, request, context):
+        """Tool execution: Go sends task, Python streams back progress events
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -79,6 +90,11 @@ def add_AgentServiceServicer_to_server(servicer, server):
                     servicer.StreamAgent,
                     request_deserializer=langgraph_dot_v1_dot_agent__pb2.AgentRequest.FromString,
                     response_serializer=langgraph_dot_v1_dot_agent__pb2.AgentEvent.SerializeToString,
+            ),
+            'ExecuteTask': grpc.unary_stream_rpc_method_handler(
+                    servicer.ExecuteTask,
+                    request_deserializer=langgraph_dot_v1_dot_agent__pb2.TaskRequest.FromString,
+                    response_serializer=langgraph_dot_v1_dot_agent__pb2.TaskEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -137,6 +153,33 @@ class AgentService(object):
             '/langgraph.v1.AgentService/StreamAgent',
             langgraph_dot_v1_dot_agent__pb2.AgentRequest.SerializeToString,
             langgraph_dot_v1_dot_agent__pb2.AgentEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/langgraph.v1.AgentService/ExecuteTask',
+            langgraph_dot_v1_dot_agent__pb2.TaskRequest.SerializeToString,
+            langgraph_dot_v1_dot_agent__pb2.TaskEvent.FromString,
             options,
             channel_credentials,
             insecure,

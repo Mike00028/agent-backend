@@ -1,0 +1,257 @@
+Task ID,Title,Description,Definition of Done (DOD),Man Days
+"GO-01","Circuit Breaker Middleware","Implement request-level circuit breaker with regex blocklist and embedding deny-list. Trip → HTTP 400 in <1ms without gRPC call","✓ Blocks malicious patterns via regex matching
+✓ Maintains deny-list in Redis with TTL
+✓ Returns HTTP 400 with request_id in logs
+✓ Latency <1ms on trip
+✓ Unit tests for regex patterns and allowlist/blocklist logic
+✓ Integration test with actual Gin middleware","2"
+"GO-02","JWT Authentication Middleware","Validate Bearer tokens before processing. Extract user_id and set in request context","✓ Parses Authorization header
+✓ Validates token signature (JWKS endpoint or static key)
+✓ Extracts user_id claim and injects into gRPC request
+✓ Returns HTTP 401 for invalid/missing token
+✓ Unit tests for valid/invalid/expired tokens
+✓ Middleware integration test","1.5"
+"GO-03","CORS Middleware","Implement origin allowlist with preflight request handling","✓ Accepts requests only from whitelisted origins
+✓ Handles OPTIONS preflight requests
+✓ Sets Access-Control headers correctly
+✓ Configurable via env var (comma-separated list)
+✓ Unit tests for allowed/denied origins
+✓ Preflight response validation","1"
+"GO-04","Rate Limiter","Implement per-IP token bucket rate limiting: 50 req/s, burst 100","✓ Uses token bucket algorithm
+✓ Keyed by client IP (with X-Forwarded-For handling)
+✓ Returns HTTP 429 when limit exceeded
+✓ Burst of 100 requests allowed
+✓ Resets every 1s per IP
+✓ Unit tests for bucket behavior and burst handling
+✓ Integration test under load","1.5"
+"GO-05","Structured Logger","Implement JSON structured logging with request_id, session_id, latency_ms","✓ All requests logged as JSON to stdout
+✓ Includes: request_id (UUID), session_id, method, path, latency_ms, user_id, status_code
+✓ Error messages captured with stack trace
+✓ Integration with container logging stack (Elasticsearch/Splunk)
+✓ Unit test for log format
+✓ Performance test: <1ms logging overhead","1"
+"GO-06","gRPC Connection Pool","Implement round-robin pool with keepalive (120s ping, 10s timeout)","✓ Pool size = GRPC_POOL_SIZE env var (default 50)
+✓ Round-robin selection across N connections
+✓ Keepalive: ping every 120s, 10s timeout
+✓ Graceful reconnect on broken connection
+✓ Max recv message: 10 MB
+✓ Unit tests for round-robin distribution
+✓ Integration test: simulate 1000 concurrent requests
+✓ Load test: verify no silent drops on long streams","3"
+"GO-07","Agent Registry Cache","Load Postgres agent specs at startup; refresh every 30s via background goroutine","✓ Queries agents table: agent_id, system_prompt, tools[], sub_agents[], approval_required_tools[], model, memory_policy{}
+✓ Caches in sync.Map keyed by agent_id
+✓ Refreshes every 30s (configurable via env var)
+✓ Access control: checks agent_permissions table against user roles
+✓ Returns 404 if agent not found
+✓ Unit tests for cache TTL and refresh logic
+✓ Integration test: verify cache miss → DB query → cache hit
+✓ Concurrency test: 10k goroutines fetching same agent spec","2"
+"GO-08","Session History Retrieval","GET session history from Redis keyed by session_id; inject into gRPC request","✓ Queries Redis with timeout <5ms
+✓ History is JSON array of conversation turns (token-bounded by Go)
+✓ Injected into AgentRequest.options.history[] before gRPC call
+✓ Missing key returns empty array (not error)
+✓ Handles malformed JSON gracefully
+✓ Unit tests for Redis hit/miss/malformed
+✓ Performance test: <5ms latency at 1000 concurrent reads","1.5"
+"GO-09","Memory Writer - Summary","Embed done.summary → upsert memory_summary table with user_id scope","✓ Receives DoneEvent.summary from gRPC stream
+✓ Calls Ollama embedding API (OLLAMA_BASE_URL)
+✓ Upserts into memory_summary(user_id, agent_id, embedding, text, created_at)
+✓ Runs in separate goroutine (non-blocking)
+✓ Respects memory_policy: skip if policy.summary == 'never' or (policy.summary == 'eval_ok_only' AND !eval_ok)
+✓ Error handling: logs failure but doesn't fail request
+✓ Unit tests for embedding + upsert logic
+✓ Integration test with real Postgres + Ollama","2"
+"GO-10","Memory Writer - Workflow","Embed done.dag_json → deduplicate → insert memory_workflow table (agent_id scoped)","✓ Receives DoneEvent.dag_json from gRPC stream
+✓ Embeds via Ollama
+✓ Deduplication: skip insert if cosine distance < 0.1 to existing row for agent_id
+✓ Inserts into memory_workflow(agent_id, query_embedding, dag_json, created_at)
+✓ Runs in separate goroutine (non-blocking)
+✓ Respects memory_policy: skip if policy.workflow == 'never' or (policy.workflow == 'eval_ok_only' AND !eval_ok)
+✓ Error handling: logs failure but doesn't fail request
+✓ Unit tests for deduplication logic (cosine distance)
+✓ Integration test: verify dedup threshold behavior","2.5"
+"GO-11","Memory Writer - Entities","Extract and embed entities → upsert memory_entity table (user_id scoped)","✓ Receives DoneEvent.entities[] from gRPC stream: [{name, type, context}]
+✓ For each entity: embed name + type
+✓ Upserts into memory_entity(user_id, entity_name, entity_type, embedding, context_text, last_seen)
+✓ On conflict: update last_seen timestamp
+✓ Runs in separate goroutine (non-blocking)
+✓ Always writes regardless of eval_ok (per architecture rule)
+✓ Error handling: logs failure but doesn't fail request
+✓ Unit tests for upsert + conflict handling
+✓ Integration test with real Postgres","1.5"
+"GO-12","History Compression Write-back","Replace Redis key with [done.summary] when compress_history=true","✓ Checks AgentRequest.compress_history flag
+✓ If true: replaces full history with array containing only [done.summary]
+✓ Maintains session_id → compressed_history mapping
+✓ TTL: same as original history
+✓ Runs after stream closes (in on_stream_done hook)
+✓ Unit tests for compression logic
+✓ Integration test: verify next request receives compressed history","1"
+"GO-13","Tool Call Logging","Log tool calls to tool_log table with duration tracking","✓ on_tool_call hook: record {request_id, tool_name, args_json, started_at} in in-memory map keyed by tool_call_id
+✓ on_tool_result hook: look up tool_call_id in map → compute duration_ms
+✓ Async write to tool_log(user_id, session_id, tool_name, args_json, result_json, duration_ms, created_at)
+✓ on_tool_error: same write but with error=true flag
+✓ Increment per-tool error counter in Redis for circuit breaker
+✓ Unit tests for in-memory map keying and duration calc
+✓ Integration test: verify audit trail in Postgres","2"
+"GO-14","POST /chat Endpoint (SSE)","Streaming chat endpoint: parse request → fetch agent spec → set compress_history → stream gRPC responses as SSE","✓ Accepts POST /chat with JSON body: {message, model, session_id?, agent_id, user_id, conversation_context?}
+✓ Generates request_id (UUID)
+✓ Fetches agent spec from cache
+✓ Checks history token count; sets compress_history=true if > 80% of context window
+✓ Calls gRPC StreamAgent with full AgentRequest
+✓ Streams SSE frames to browser: text, thinking, tool_call, tool_result, approval_required, error, done
+✓ Implements all lifecycle hooks (on_request_start, on_stream_event, etc.)
+✓ Graceful close on client disconnect
+✓ Unit tests for request validation
+✓ Integration test: 10-turn conversation with tool calls","3"
+"GO-15","POST /agent/approve Endpoint (HITL Resume)","Load checkpointed thread → resume with approval decision","✓ Accepts POST /agent/approve with {thread_id, approved: bool}
+✓ Validates user owns thread_id (from pending_approvals table)
+✓ Opens new gRPC StreamAgent(resume=true, thread_id=X, approved)
+✓ Streams response as SSE (same as /chat)
+✓ Clears pending_approvals table entry after resume
+✓ Unit tests for authorization checks
+✓ Integration test: approve tool call, verify graph resumes from exact point","2"
+"GO-16","GET /agent/status Endpoint","Return approval status or execution status by thread_id","✓ Accepts GET /agent/status/:thread_id
+✓ Returns {status: 'pending'|'running'|'awaiting'|'done', thread_id, created_at, updated_at}
+✓ Queries pending_approvals table for pending status
+✓ Queries graph_checkpoints for running/awaiting
+✓ Returns 404 if thread_id not found
+✓ Unit tests for status queries
+✓ Integration test: verify status transitions","1"
+"GO-17","GET /healthz Endpoint","Lightweight probe for load balancer: check gRPC pool and Postgres connectivity","✓ Returns {status: 'ok', timestamp}
+✓ Pings one gRPC connection from pool (< 1s timeout)
+✓ Pings Postgres (< 1s timeout)
+✓ Returns HTTP 200 if both OK, 503 if either fails
+✓ Metrics: response time
+✓ Unit tests for dependency checks","1"
+"GO-18","POST /agents Endpoint (Custom Agent CRUD - Create)","Validate and INSERT user-defined agent spec to Postgres","✓ Accepts POST /agents with agent spec JSON (Level A: frontend-configurable fields only)
+✓ Validates: agent_id is unique per user, tools[] ⊆ platform MCP registry, system_prompt not empty
+✓ Validates sub_agents[]: all must be public platform agents OR owned by caller
+✓ Validates approval_required_tools[]: all must be in tools[]
+✓ Inserts into agents table with user_id ownership
+✓ Returns 201 + created agent spec
+✓ Unit tests for validation logic
+✓ Integration test: CRUD cycle","1.5"
+"GO-19","PUT /agents/:agent_id Endpoint (Custom Agent CRUD - Update)","Validate and UPDATE user-owned agent spec in Postgres","✓ Checks user owns agent_id
+✓ Applies same validation as POST /agents
+✓ Updates agents table row
+✓ Invalidates registry cache for this agent_id (immediate)
+✓ Returns 200 + updated spec
+✓ Unit tests for authorization and validation
+✓ Integration test: verify cache invalidation","1"
+"GO-20","DELETE /agents/:agent_id Endpoint (Custom Agent CRUD - Delete)","Soft or hard delete user-defined agent from Postgres","✓ Checks user owns agent_id
+✓ Soft delete: set deleted_at timestamp
+✓ Hard delete: remove row (if no ongoing sessions reference it)
+✓ Invalidates registry cache
+✓ Returns 204 No Content
+✓ Unit tests for ownership verification
+✓ Integration test: verify soft delete doesn't break existing sessions","1"
+"GO-21","System Prompt Assembly","Resolve full agent spec from cache and inject into gRPC request","✓ Queries agent registry cache (sync.Map) by agent_id
+✓ Merges agent spec fields with request overrides (model, planner_model)
+✓ Builds AgentRequest.options with all required fields:
+   - system_prompt, tools[], sub_agents[], tool_agent_map, approval_required_tools[]
+   - evaluator_enabled, max_iterations, memory_policy, sandbox_backend
+✓ Validates tool_agent_map matches current platform tool definitions
+✓ Unit tests for spec resolution and merging logic
+✓ Integration test: override model, verify injected correctly","1.5"
+"GO-22","Lifecycle Hooks - Request Start","Generate request_id and check history token count for compression","✓ Generates UUID request_id
+✓ Fetches session history from Redis
+✓ Counts tokens in history (LLM model context window map)
+✓ If > 80% of model.context_window: sets compress_history=true
+✓ Sets in-memory map for tool call tracking: {tool_call_id → {started_at, tool_name, args}}
+✓ Injects all into AgentRequest
+✓ Unit tests for token counting logic","1"
+"GO-23","Lifecycle Hooks - Stream Event","Forward SSE frames to browser in real-time","✓ Receives gRPC stream events from Python
+✓ Converts to SSE format: data: {json}
+✓ Appends response_id header
+✓ Writes to http.ResponseWriter with flush (streaming)
+✓ No buffering — immediate delivery
+✓ Unit tests for SSE format compliance
+✓ Integration test: verify browser receives frames in order","0.5"
+"GO-24","Lifecycle Hooks - Tool Call & Result","Track tool duration; write to tool_log table","✓ on_tool_call: record {request_id, tool_name, args_json, started_at} in map
+✓ on_tool_result: lookup → compute duration_ms → write to tool_log async
+✓ on_tool_error: same as result + error=true flag
+✓ Increment error counter in Redis per tool_name for circuit breaker
+✓ Unit tests for map keying and duration calc
+✓ Integration test: verify tool_log audit trail","1.5"
+"GO-25","Lifecycle Hooks - Stream Done","Fire 3 parallel memory writers and compress history","✓ Receives DoneEvent with eval_ok, summary, dag_json, entities[]
+✓ Spawns 3 goroutines (summary, workflow, entities writers)
+✓ Each respects memory_policy per-type
+✓ If compress_history=true: replace Redis key with [done.summary]
+✓ Closes SSE stream
+✓ Unit tests for goroutine spawning (no race conditions)
+✓ Integration test: verify all 3 writes complete within 5s timeout","2"
+"GO-26","Lifecycle Hooks - Approval Required","Store pending approval + notify user","✓ Receives approval_required SSE event: {thread_id, tool, args}
+✓ Inserts into pending_approvals(user_id, thread_id, tool_name, args_json, created_at)
+✓ Emits approval_required SSE frame to browser
+✓ User ID checked against JWT token
+✓ Unit tests for insertion logic
+✓ Integration test: verify user sees approval prompt","1"
+"GO-27","Lifecycle Hooks - Approve","Resume graph with approval decision","✓ on_approve hook (POST /agent/approve)
+✓ Loads thread_id from pending_approvals table
+✓ Verifies user owns it
+✓ Opens new gRPC StreamAgent call with resume=true, approved=true
+✓ Streams response
+✓ Deletes from pending_approvals
+✓ Unit tests for ownership check
+✓ Integration test: full approve → resume flow","1.5"
+"GO-28","Postgres Schema & Migrations","Define all tables for agent registry, memory, tools, approvals, and audit logs","✓ agents table: agent_id, user_id, system_prompt, tools[], sub_agents[], model, memory_policy, created_at, updated_at, deleted_at
+✓ agent_permissions table: user_id, agent_id, role
+✓ memory_summary table: user_id, agent_id, embedding (vector), text, created_at (with pgvector index)
+✓ memory_workflow table: agent_id, query_embedding, dag_json, created_at (with pgvector index)
+✓ memory_entity table: user_id, entity_name, entity_type, embedding, context_text, last_seen (unique on user+name+type)
+✓ tool_log table: user_id, session_id, tool_name, args_json, result_json, error, duration_ms, created_at (partitioned by month)
+✓ pending_approvals table: user_id, thread_id, tool_name, args_json, created_at
+✓ Run migrations on startup with rollback capability
+✓ Performance: <100ms cold start with 1M rows
+✓ Backup/restore procedures documented","3"
+"GO-29","Redis Schema & TTL Policies","Define Redis keys for session history and error counters","✓ session:{session_id} → []DoneEvent (history, token-bounded)
+   TTL: 7 days (configurable)
+✓ tool_error:{tool_name} → counter (for circuit breaker)
+   TTL: 1 hour (sliding window)
+✓ compress_history:{session_id} → done.summary (if compress_history=true)
+   TTL: same as full history
+✓ Implement cleanup jobs for expired keys
+✓ Unit tests for TTL enforcement
+✓ Integration test: verify keys expire correctly","1.5"
+"GO-30","Configuration & Environment Variables","Define and validate all Go env vars at startup","✓ PYTHON_GRPC_ADDR (default localhost:50051)
+✓ GRPC_POOL_SIZE (default 10)
+✓ GRPC_MAX_WORKERS (default 10)
+✓ AUTH_TOKEN or JWKS_URL
+✓ REDIS_ADDR (default localhost:6379)
+✓ REDIS_DB (default 0)
+✓ POSTGRES_DSN (required)
+✓ OLLAMA_BASE_URL (default http://localhost:11434)
+✓ RATE_LIMIT_RPS (default 50)
+✓ RATE_LIMIT_BURST (default 100)
+✓ LOG_LEVEL (default info)
+✓ CIRCUIT_BREAKER_THRESHOLD (error threshold %)
+✓ Validate all required vars present at startup
+✓ Fail fast with clear error messages
+✓ Unit tests for config parsing","1"
+"GO-31","Error Handling & Observability","Implement structured error handling with correlation IDs","✓ All errors tagged with request_id
+✓ Distinguish: user error (400) vs system error (500) vs unavailable (503)
+✓ Timeout errors propagate with context
+✓ Circuit breaker trips logged as warnings
+✓ Tool errors tracked in Redis per tool for observability
+✓ Metrics export: response time, error rate (prom format)
+✓ Unit tests for error categorization
+✓ Integration test: error scenarios with tracing","2"
+"GO-32","Load Testing & Benchmarks","Verify performance under 10k concurrent users","✓ Implement load test using locust or k6
+✓ Target: p95 latency < 800ms (first token)
+✓ Run against /chat endpoint with:
+   - 500 req/s peak (10k users / 20 RPS per user)
+   - 500 concurrent connections
+   - 10-turn conversations
+✓ Measure: latency, throughput, error rate, gRPC pool utilization
+✓ Benchmark individual components: Redis lookup <5ms, Postgres agent fetch <10ms
+✓ Document results in README
+✓ Baseline for regression detection on future changes","3"
+"GO-33","Documentation & Runbooks","Document deployment, scaling, and operations","✓ API documentation: endpoints, request/response formats, error codes
+✓ Deployment guide: Docker, K8s manifests, env var checklist
+✓ Runbooks: scaling Go pods, monitoring gRPC pool, debugging connection issues
+✓ Architecture diagram: Go ↔ Python ↔ Ollama
+✓ Memory model: summary vs workflow vs entity (user_id vs agent_id scoping)
+✓ HITL approval flow with diagrams
+✓ Sample curl requests for all endpoints
+✓ SLA/non-functional requirements: latency, availability, throughput
+✓ All docs reviewed and tested","2"

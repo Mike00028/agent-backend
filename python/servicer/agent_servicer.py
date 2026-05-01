@@ -17,6 +17,7 @@ import uuid
 from typing import cast
 
 import grpc
+import logging
 
 # Generated grpc stubs import from "langgraph.v1", so expose python/gen on sys.path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gen"))
@@ -26,6 +27,8 @@ from agents.router.graph import RouterState, build_graph as build_router_graph
 from agents.rag.retriever import InMemoryEmbeddingRetriever
 from config import load
 from providers import LLMProvider
+
+_log = logging.getLogger("servicer")
 
 _cfg = load()
 _semaphore = asyncio.Semaphore(_cfg.grpc_max_concurrent)
@@ -62,22 +65,42 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
 
         options = dict(request.options) if request.options else {}
         model = _resolve_model(request.model)
+        history = _extract_history(options)
+        messages = history + [{"role": "user", "content": request.message}]
 
         async with _semaphore:
             try:
                 start_time = time.time()
                 tool_calls_count = 0
+                request_id = str(uuid.uuid4())
 
                 state = cast(RouterState, {
+                    "request_id": request_id,
                     "session_id": request.session_id,
-                    "messages": [{"role": "user", "content": request.message}],
+                    "messages": messages,
                     "model": model,
+                    "planner_model": _cfg.planner_model,
+                    "evaluator_model": _cfg.evaluator_model,
                     "options": options,
-                    "route": "",
+                    "gate": "",
+                    "plan_mode": "",
+                    "plan_tasks": [],
+                    "plan_max_tasks": _cfg.planner_max_tasks,
+                    "plan_max_text_len": _cfg.planner_max_text_len,
+                    "planner_timeout_seconds": _cfg.planner_timeout_seconds,
+                    "executor_timeout_seconds": _cfg.executor_timeout_seconds,
+                    "system_prompt": _cfg.system_prompt,
                     "retrieved_context": "",
                     "result": "",
+                    "message": "",
+                    "thinking": "",
                     "tool_calls": [],
                     "tool_results": [],
+                    "eval_ok": False,
+                    "eval_feedback": "",
+                    "iteration": 0,
+                    "max_iterations": _cfg.agent_max_iterations,
+                    "evaluator_enabled": _cfg.evaluator_enabled,
                 })
                 output = await _graph.ainvoke(state)
                 
@@ -86,6 +109,25 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                     tool_calls_count = len(output.get("tool_calls", []))
                 
                 execution_time_ms = int((time.time() - start_time) * 1000)
+
+                if output.get("error"):
+                    return agent_pb2.AgentResponse(
+                        metadata=agent_pb2.ResponseMetadata(
+                            session_id=request.session_id,
+                            model=model,
+                            tool_calls_count=tool_calls_count,
+                            execution_time_ms=execution_time_ms,
+                        ),
+                        error=str(output.get("error")),
+                    )
+
+                _log.info(
+                    "{\"event\":\"request.done\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"model\":\"%s\",\"latency_ms\":%d}",
+                    request_id,
+                    request.session_id,
+                    model,
+                    execution_time_ms,
+                )
                 
                 return agent_pb2.AgentResponse(
                     metadata=agent_pb2.ResponseMetadata(
@@ -112,25 +154,64 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
 
         options = dict(request.options) if request.options else {}
         model = _resolve_model(request.model)
+        history = _extract_history(options)
+        messages = history + [{"role": "user", "content": request.message}]
 
         async with _semaphore:
             try:
+                request_id = str(uuid.uuid4())
+                session_id = request.session_id
                 state = cast(RouterState, {
+                    "request_id": request_id,
                     "session_id": request.session_id,
-                    "messages": [{"role": "user", "content": request.message}],
+                    "messages": messages,
                     "model": model,
+                    "planner_model": _cfg.planner_model,
+                    "evaluator_model": _cfg.evaluator_model,
                     "options": options,
-                    "route": "",
+                    "gate": "",
+                    "plan_mode": "",
+                    "plan_tasks": [],
+                    "plan_max_tasks": _cfg.planner_max_tasks,
+                    "plan_max_text_len": _cfg.planner_max_text_len,
+                    "planner_timeout_seconds": _cfg.planner_timeout_seconds,
+                    "executor_timeout_seconds": _cfg.executor_timeout_seconds,
+                    "system_prompt": _cfg.system_prompt,
                     "retrieved_context": "",
                     "result": "",
+                    "message": "",
+                    "thinking": "",
                     "tool_calls": [],
                     "tool_results": [],
+                    "eval_ok": False,
+                    "eval_feedback": "",
+                    "iteration": 0,
+                    "max_iterations": _cfg.agent_max_iterations,
+                    "evaluator_enabled": _cfg.evaluator_enabled,
                 })
 
                 # Stream graph events
-                async for event in _graph.astream(state):
+                _log.info(
+                    "{\"event\":\"stream.start\",\"request_id\":\"%s\",\"session_id\":\"%s\"}",
+                    request_id,
+                    session_id,
+                )
+                async for event in _graph.astream(state, stream_mode="updates"):
+                    _log.info(
+                        "{\"event\":\"stream.astream_event\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"nodes\":\"%s\"}",
+                        request_id,
+                        session_id,
+                        ",".join(event.keys()),
+                    )
                     # event is {node_name: node_output}
                     for node_name, node_output in event.items():
+                        _log.info(
+                            "{\"event\":\"stream.node\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\",\"keys\":\"%s\"}",
+                            request_id,
+                            session_id,
+                            node_name,
+                            ",".join(sorted(node_output.keys())),
+                        )
                         # Get current timestamp in milliseconds
                         timestamp_ms = int(time.time() * 1000)
                         
@@ -147,19 +228,40 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                         # Tool calls emitted by LLM
                         if "tool_calls" in node_output:
                             for tc in node_output["tool_calls"]:
+                                try:
+                                    args_json = json.dumps(tc.get("args", {}))
+                                except (TypeError, ValueError) as e:
+                                    _log.warning(
+                                        "{\"event\":\"stream.error\",\"type\":\"tool_call_args\",\"request_id\":\"%s\",\"error\":\"%s\"}",
+                                        request_id,
+                                        str(e),
+                                    )
+                                    args_json = \"{}\"
+                                _log.info(
+                                    "{\"event\":\"stream.emit\",\"type\":\"tool_call\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
+                                    request_id,
+                                    session_id,
+                                    node_name,
+                                )
                                 yield agent_pb2.AgentEvent(
                                     event_type="tool_call",
                                     metadata=metadata,
                                     tool_call=agent_pb2.ToolCall(
                                         id=tc.get("id", ""),
                                         name=tc.get("name", ""),
-                                        args_json=json.dumps(tc.get("args", {})),
+                                        args_json=args_json,
                                     ),
                                 )
                         
                         # Tool results from execution
                         if "tool_results" in node_output:
                             for tr in node_output["tool_results"]:
+                                _log.info(
+                                    "{\"event\":\"stream.emit\",\"type\":\"tool_result\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
+                                    request_id,
+                                    session_id,
+                                    node_name,
+                                )
                                 yield agent_pb2.AgentEvent(
                                     event_type="tool_result",
                                     metadata=metadata,
@@ -171,22 +273,40 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                         
                         # Final result text
                         if "result" in node_output and node_output["result"]:
+                            _log.info(
+                                "{\"event\":\"stream.emit\",\"type\":\"text\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
+                                request_id,
+                                session_id,
+                                node_name,
+                            )
                             yield agent_pb2.AgentEvent(
                                 event_type="text",
                                 metadata=metadata,
                                 text=node_output["result"],
                             )
                         
-                        # Any intermediate messages
-                        if "message" in node_output:
+                        # Any intermediate messages (skip if empty)
+                        if "message" in node_output and str(node_output["message"]).strip():
+                            _log.info(
+                                "{\"event\":\"stream.emit\",\"type\":\"message\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
+                                request_id,
+                                session_id,
+                                node_name,
+                            )
                             yield agent_pb2.AgentEvent(
                                 event_type="message",
                                 metadata=metadata,
                                 message=node_output["message"],
                             )
                         
-                        # Thinking/analysis events
-                        if thinking:
+                        # Thinking/analysis events (skip if empty or same as message)
+                        if thinking and thinking.strip() and thinking != node_output.get("message", ""):
+                            _log.info(
+                                "{\"event\":\"stream.emit\",\"type\":\"thinking\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
+                                request_id,
+                                session_id,
+                                node_name,
+                            )
                             yield agent_pb2.AgentEvent(
                                 event_type="thinking",
                                 metadata=metadata,
@@ -195,13 +315,21 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                         
                         # Errors
                         if "error" in node_output:
+                            error_text = str(node_output.get("error") or "Unknown error")
+                            _log.info(
+                                "{\"event\":\"stream.emit\",\"type\":\"error\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
+                                request_id,
+                                session_id,
+                                node_name,
+                            )
                             yield agent_pb2.AgentEvent(
                                 event_type="error",
                                 metadata=metadata,
-                                error=node_output["error"],
+                                error=error_text,
                             )
             except Exception as exc:
-                await context.abort(grpc.StatusCode.INTERNAL, str(exc))
+                _log.exception("stream agent error")
+                await context.abort(grpc.StatusCode.INTERNAL, str(exc) or "internal error")
 
 
 def _is_valid_uuid(session_id: str) -> bool:
@@ -221,3 +349,18 @@ def _resolve_model(request_model: str) -> str:
     if candidate.lower() in {"default-chat", "default", "chat"}:
         return _cfg.llm_model
     return candidate
+
+
+def _extract_history(options: dict) -> list[dict[str, str]]:
+    history = options.get("history") if isinstance(options, dict) else None
+    if not isinstance(history, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "user"))
+        content = str(item.get("content", ""))
+        if content:
+            normalized.append({"role": role, "content": content})
+    return normalized

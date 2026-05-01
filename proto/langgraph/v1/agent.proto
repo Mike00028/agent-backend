@@ -6,73 +6,90 @@ import "google/protobuf/struct.proto";
 
 option go_package = "github.com/mike00028/golang-backend/services/api/internal/langgraphv1";
 
-// ─── Messages ────────────────────────────────────────────────────────────────
+// ─── Legacy Messages (kept for backward compatibility) ───────────────────────
 
 message AgentRequest {
   string session_id                    = 1;
   string message                       = 2;
   google.protobuf.Struct options       = 3;
-  string model                         = 4;  // optional: which LLM/graph to use (defaults to "default-chat")
+  string model                         = 4;
 }
 
-// Tool call emitted by the LLM node
 message ToolCall {
   string id         = 1;
   string name       = 2;
-  string args_json  = 3;  // serialized tool arguments
+  string args_json  = 3;
 }
 
-// Result from tool execution
 message ToolResult {
   string tool_call_id = 1;
-  string content      = 2;  // tool output
+  string content      = 2;
 }
 
-// Metadata for streaming events
 message EventMetadata {
-  int64 timestamp_ms          = 1;  // milliseconds since epoch
-  string node_name            = 2;  // which graph node emitted this
-  string thinking             = 3;  // agent reasoning/analysis
+  int64 timestamp_ms  = 1;
+  string node_name    = 2;
+  string thinking     = 3;
 }
 
-// Metadata for unary response
 message ResponseMetadata {
-  string session_id           = 1;
-  string model                = 2;
-  int32 tool_calls_count      = 3;
-  int64 execution_time_ms     = 4;
+  string session_id        = 1;
+  string model             = 2;
+  int32 tool_calls_count   = 3;
+  int64 execution_time_ms  = 4;
 }
 
-// Streaming event from the agent graph
 message AgentEvent {
-  string event_type           = 1;  // "tool_call" | "tool_result" | "text" | "error" | "message" | "thinking"
-  EventMetadata metadata      = 2;  // event context (timestamp, node, thinking)
-  
+  string event_type      = 1;
+  EventMetadata metadata = 2;
+
   oneof content {
-    string text        = 3;  // text chunk or final response
-    string error       = 4;  // error message
-    ToolCall tool_call = 5;  // LLM emitted a tool call
-    ToolResult tool_result = 6;  // tool execution result
-    string message     = 7;  // intermediate message
+    string text              = 3;
+    string error             = 4;
+    ToolCall tool_call       = 5;
+    ToolResult tool_result   = 6;
+    string message           = 7;
   }
 }
 
-// Unary response (single text response, no streaming)
 message AgentResponse {
-  ResponseMetadata metadata   = 1;  // response context (session, model, counts)
-  
+  ResponseMetadata metadata = 1;
+
   oneof result {
     string text  = 2;
     string error = 3;
   }
 }
 
+// ─── DAG Orchestration Messages ──────────────────────────────────────────────
+// Note: PlanDAG and EvaluateDAG are handled natively in Go (Ollama structured
+// output). Python is only responsible for ExecuteTask (tool execution).
+
+// ExecuteTask: Go tells Python to run one tool and stream back progress events.
+message TaskRequest {
+  string session_id = 1;
+  string task_id    = 2;  // Unique node ID (e.g. "t1")
+  string tool_name  = 3;
+  string args_json  = 4;
+  string context    = 5;  // Dependency outputs injected by Go (text form)
+  string agent_id   = 6;
+}
+
+// Streamed event for a single task execution.
+message TaskEvent {
+  string type     = 1;  // "started" | "progress" | "text" | "done" | "error"
+  string payload  = 2;  // JSON payload (progress %, partial text, final result)
+  int32  pct      = 3;  // Progress 0–100 (for "progress" events)
+  string error    = 4;  // Error description (for "error" events)
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 service AgentService {
-  // Unary: full response in one shot (blocks until done)
-  rpc RunAgent (AgentRequest) returns (AgentResponse);
-
-  // Server-streaming: stream all events (tool calls, results, text) back in real-time
+  // Legacy: kept for backward compatibility
+  rpc RunAgent    (AgentRequest) returns (AgentResponse);
   rpc StreamAgent (AgentRequest) returns (stream AgentEvent);
+
+  // Tool execution: Go sends task, Python streams back progress events
+  rpc ExecuteTask (TaskRequest)  returns (stream TaskEvent);
 }

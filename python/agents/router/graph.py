@@ -1,27 +1,48 @@
-"""Supervisor router graph: classifies then conditionally branches to agent nodes."""
+"""Supervisor graph: gate -> planner -> executor -> evaluator loop."""
 
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from agents.chat.nodes import build_llm_node
-from agents.math.nodes import build_math_llm_node, build_math_tools_node
-from agents.rag.nodes import build_answer_node, build_retriever_node
 from agents.rag.retriever import InMemoryEmbeddingRetriever
-from agents.router.nodes import build_multi_node, build_route_node, pick_route
+from agents.router.nodes import (
+    build_evaluator_node,
+    build_executor_node,
+    build_gate_node,
+    build_planner_node,
+    pick_eval,
+    pick_gate,
+)
 from providers.interfaces import ChatProvider
 
 
 class RouterState(TypedDict):
+    request_id: str
     session_id: str
     messages: list[dict[str, Any]]
     model: str
+    planner_model: str
+    evaluator_model: str
     options: dict[str, Any]
-    route: str
+    gate: str
+    plan_mode: str
+    plan_tasks: list[dict[str, Any]]
+    plan_max_tasks: int
+    plan_max_text_len: int
+    planner_timeout_seconds: float
+    executor_timeout_seconds: float
     retrieved_context: str
     result: str
+    message: str
+    thinking: str
     tool_calls: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
+    eval_ok: bool
+    eval_feedback: str
+    iteration: int
+    max_iterations: int
+    evaluator_enabled: bool
+    system_prompt: str
 
 
 def build_graph(
@@ -30,40 +51,38 @@ def build_graph(
     retriever: InMemoryEmbeddingRetriever,
     default_model: str,
 ):
-    route_node     = build_route_node(chat_provider, default_model)
-    chat_node      = build_llm_node(chat_provider, default_model)
-    retriever_node = build_retriever_node(retriever)
-    answer_node    = build_answer_node(chat_provider, default_model)
-    math_llm_node  = build_math_llm_node(chat_provider, default_model)
-    math_tools_node = build_math_tools_node()
+    gate_node = build_gate_node(chat_provider, default_model)
+    planner_node = build_planner_node(chat_provider, default_model)
+    executor_node = build_executor_node(chat_provider, retriever, default_model)
+    evaluator_node = build_evaluator_node(chat_provider, default_model)
 
     graph = StateGraph(RouterState)
 
-    # ── Nodes ──────────────────────────────────────────────────────────────
-    graph.add_node("route",        route_node)
-    graph.add_node("chat",         chat_node)
-    graph.add_node("rag_retriever", retriever_node)
-    graph.add_node("rag_answer",   answer_node)
-    graph.add_node("math_llm",     math_llm_node)
-    graph.add_node("math_tools",   math_tools_node)
+    graph.add_node("gate", gate_node)
+    graph.add_node("plan", planner_node)
+    graph.add_node("execute", executor_node)
+    graph.add_node("evaluate", evaluator_node)
 
-    # ── Conditional routing from route node ────────────────────────────────
     graph.add_conditional_edges(
-        "route",
-        pick_route,
+        "gate",
+        pick_gate,
         {
-            "chat": "chat",
-            "rag":  "rag_retriever",
-            "math": "math_llm",
+            "plan": "plan",
+            "execute": "execute",
         },
     )
 
-    # ── Agent-internal edges ───────────────────────────────────────────────
-    graph.add_edge("chat",         END)
-    graph.add_edge("rag_retriever", "rag_answer")
-    graph.add_edge("rag_answer",   END)
-    graph.add_edge("math_llm",     "math_tools")
-    graph.add_edge("math_tools",   END)
+    graph.add_edge("plan", "execute")
+    graph.add_edge("execute", "evaluate")
 
-    graph.set_entry_point("route")
+    graph.add_conditional_edges(
+        "evaluate",
+        pick_eval,
+        {
+            "retry": "plan",
+            "done": END,
+        },
+    )
+
+    graph.set_entry_point("gate")
     return graph.compile()
