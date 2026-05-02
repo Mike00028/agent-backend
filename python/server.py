@@ -17,6 +17,38 @@ if platform.system() != "Windows":
     except ImportError:
         uvloop = None
 
+# ── OpenTelemetry bootstrap ───────────────────────────────────────────────────
+def _init_otel() -> None:
+    """Bootstrap OTel SDK if OTEL_EXPORTER_OTLP_ENDPOINT is configured."""
+    endpoint = os.getenv("LANGFUSE_OTLP_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    if not endpoint:
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        import base64
+
+        headers = {}
+        pub = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+        sec = os.getenv("LANGFUSE_SECRET_KEY", "")
+        if pub and sec:
+            token = base64.b64encode(f"{pub}:{sec}".encode()).decode()
+            headers["Authorization"] = f"Basic {token}"
+
+        resource = Resource(attributes={SERVICE_NAME: os.getenv("OTEL_SERVICE_NAME", "python-agent")})
+        exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        logging.getLogger(__name__).info("OTel tracing enabled endpoint=%s", endpoint)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("OTel init failed: %s", exc)
+
+_init_otel()
+
 # Generated grpc stubs import from "langgraph.v1", so expose python/gen on sys.path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gen"))
 

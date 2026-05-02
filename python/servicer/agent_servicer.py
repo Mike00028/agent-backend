@@ -11,6 +11,7 @@ Includes metadata: timestamp_ms, node_name, thinking.
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -19,11 +20,28 @@ from typing import cast
 import grpc
 import logging
 
+try:
+    from opentelemetry import trace as otel_trace
+    _tracer = otel_trace.get_tracer("python-agent")
+except Exception:
+    _tracer = None  # type: ignore[assignment]
+
+
+class _null_span:
+    """No-op context manager used when OTel is not available."""
+    def __enter__(self): return None
+    def __exit__(self, *_): pass
+
+
 # Generated grpc stubs import from "langgraph.v1", so expose python/gen on sys.path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gen"))
 
 from langgraph.v1 import agent_pb2, agent_pb2_grpc  # type: ignore[import-not-found]
 from agents.router.graph import RouterState, build_graph as build_router_graph
+from agents.rag.graph import RagState, build_graph as build_rag_graph
+from agents.chat.graph import ChatState, build_graph as build_chat_graph
+from agents.summarize.graph import SummarizeState, build_graph as build_summarize_graph
+from agents.text.graph import TextState, build_graph as build_text_graph
 from agents.rag.retriever import InMemoryEmbeddingRetriever
 from config import load
 from providers import LLMProvider
@@ -43,12 +61,38 @@ _retriever = InMemoryEmbeddingRetriever(
     top_k=_cfg.rag_top_k,
 )
 
-# Single supervisor graph — routes to chat / rag / math internally via conditional edges.
+# ─── Agent graph registry ────────────────────────────────────────────────────
+# supervisor/router graph — used by RunAgent / StreamAgent
 _graph = build_router_graph(
     chat_provider=_chat_provider,
     retriever=_retriever,
     default_model=_cfg.llm_model,
 )
+
+# Specialist graphs — used by ExecuteTask (Go DAG executor calls these directly)
+_rag_graph = build_rag_graph(
+    chat_provider=_chat_provider,
+    retriever=_retriever,
+    default_model=_cfg.llm_model,
+)
+_chat_graph = build_chat_graph(
+    chat_provider=_chat_provider,
+    default_model=_cfg.llm_model,
+)
+_summarize_graph = build_summarize_graph(
+    chat_provider=_chat_provider,
+    default_model=_cfg.llm_model,
+)
+_text_graph = build_text_graph()
+
+# Maps tool_name → graph
+# Go planner is told to use exactly these names.
+_AGENT_REGISTRY: dict = {
+    "rag_agent":       _rag_graph,
+    "chat_agent":      _chat_graph,
+    "summarize_agent": _summarize_graph,
+    "text_agent":      _text_graph,
+}
 
 
 class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
@@ -236,7 +280,7 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                                         request_id,
                                         str(e),
                                     )
-                                    args_json = \"{}\"
+                                    args_json = "{}"
                                 _log.info(
                                     "{\"event\":\"stream.emit\",\"type\":\"tool_call\",\"request_id\":\"%s\",\"session_id\":\"%s\",\"node\":\"%s\"}",
                                     request_id,
@@ -330,6 +374,138 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
             except Exception as exc:
                 _log.exception("stream agent error")
                 await context.abort(grpc.StatusCode.INTERNAL, str(exc) or "internal error")
+
+    # ── ExecuteTask ──────────────────────────────────────────────────────────
+
+    async def ExecuteTask(
+        self,
+        request: agent_pb2.TaskRequest,
+        context: grpc.aio.ServicerContext,
+    ):
+        """Stream tool-execution events back to Go's DAG executor."""
+        session_id = request.session_id
+        task_id = request.task_id
+        tool_name = (request.tool_name or "").lower().strip()
+        ctx_text = (request.context or "").strip()
+        model = _resolve_model("")
+
+        args: dict = {}
+        if request.args_json:
+            try:
+                args = json.loads(request.args_json)
+            except json.JSONDecodeError:
+                pass
+
+        _log.info(
+            '{"event":"execute_task.start","session_id":"%s","task_id":"%s","tool":"%s"}',
+            session_id, task_id, tool_name,
+        )
+
+        yield agent_pb2.TaskEvent(type="started", payload=task_id)
+
+        async with _semaphore:
+            span_ctx = _tracer.start_as_current_span(
+                f"agent.execute_task.{tool_name}",
+                attributes={
+                    "session.id": session_id,
+                    "task.id": task_id,
+                    "task.tool": tool_name,
+                }
+            ) if _tracer else _null_span()
+            with span_ctx as span:
+              try:
+                graph = _AGENT_REGISTRY.get(tool_name)
+                if graph is None:
+                    # Fallback: use chat_agent for anything unknown
+                    if args.get("retrieve"):
+                        graph = _rag_graph
+                        tool_name = "rag_agent"
+                    else:
+                        graph = _chat_graph
+                        tool_name = "chat_agent"
+                    _log.warning(
+                        '{"event":"execute_task.fallback","session_id":"%s","task_id":"%s","resolved_to":"%s"}',
+                        session_id, task_id, tool_name,
+                    )
+
+                # Build the state for whichever agent was selected
+                question = str(args.get("question") or args.get("query") or args.get("message") or ctx_text or "")
+                if tool_name == "rag_agent":
+                    state = {
+                        "session_id": session_id,
+                        "messages": [{"role": "user", "content": question}],
+                        "model": model,
+                        "options": {},
+                        "retrieved_context": "",
+                        "result": "",
+                    }
+                elif tool_name == "summarize_agent":
+                    # ctx_text is Go-injected dependency outputs: "[t1 result]: ...\n[t2 result]: ..."
+                    original_question = str(args.get("question", ""))
+                    state = {
+                        "session_id": session_id,
+                        "question": original_question,
+                        "context": ctx_text,
+                        "model": model,
+                        "options": {},
+                        "result": "",
+                    }
+                elif tool_name == "text_agent":
+                    state = {
+                        "session_id": session_id,
+                        "task_id":    task_id,
+                        "tool_name":  str(args.get("tool", "")),
+                        "args":       args,
+                        "context":    ctx_text,
+                        "result":     "",
+                    }
+                else:  # chat_agent
+                    system_prompt = str(args.get("system_prompt", _cfg.system_prompt or ""))
+                    messages = []
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
+                    # Prepend dependency outputs so the agent can use prior results.
+                    user_content = f"{ctx_text}\n{question}".strip() if ctx_text else question
+                    messages.append({"role": "user", "content": user_content})
+                    state = {
+                        "session_id": session_id,
+                        "messages": messages,
+                        "model": model,
+                        "options": {},
+                        "result": "",
+                    }
+
+                output = await asyncio.wait_for(
+                    graph.ainvoke(state),
+                    timeout=_cfg.executor_timeout_seconds,
+                )
+                result = str(output.get("result", ""))
+
+                _log.info(
+                    '{"event":"execute_task.done","session_id":"%s","task_id":"%s","agent":"%s"}',
+                    session_id, task_id, tool_name,
+                )
+                if span:
+                    span.set_attribute("result.bytes", len(result))
+                yield agent_pb2.TaskEvent(type="text", payload=result)
+                yield agent_pb2.TaskEvent(type="done", payload=result)
+
+              except asyncio.TimeoutError:
+                msg = f"task {task_id} timed out after {_cfg.executor_timeout_seconds}s"
+                _log.warning(
+                    '{"event":"execute_task.timeout","session_id":"%s","task_id":"%s"}',
+                    session_id, task_id,
+                )
+                if span:
+                    span.set_status(otel_trace.StatusCode.ERROR, msg)
+                await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, msg)
+
+              except Exception as exc:
+                _log.exception("execute_task error task_id=%s", task_id)
+                if span:
+                    span.record_exception(exc)
+                    span.set_status(otel_trace.StatusCode.ERROR, str(exc))
+                yield agent_pb2.TaskEvent(type="error", error=str(exc))
 
 
 def _is_valid_uuid(session_id: str) -> bool:

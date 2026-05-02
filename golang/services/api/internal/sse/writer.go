@@ -1,8 +1,8 @@
 package sse
 
 import (
-	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Writer wraps an http.ResponseWriter to write SSE frames.
@@ -26,12 +26,29 @@ func New(w http.ResponseWriter) (*Writer, bool) {
 
 // Send writes a single SSE data frame and flushes immediately.
 func (s *Writer) Send(data string) {
-	fmt.Fprintf(s.w, "data: %s\n\n", data)
-	s.flusher.Flush()
+	s.sendLines("", data)
 }
 
 // SendEvent writes a named SSE event frame and flushes.
+// Multi-line data is split into multiple data: lines per the SSE spec.
 func (s *Writer) SendEvent(event, data string) {
-	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
+	s.sendLines(event, data)
+}
+
+func (s *Writer) sendLines(event, data string) {
+	var sb strings.Builder
+	if event != "" {
+		sb.WriteString("event: ")
+		sb.WriteString(event)
+		sb.WriteByte('\n')
+	}
+	for i, line := range strings.Split(data, "\n") {
+		_ = i
+		sb.WriteString("data: ")
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	sb.WriteByte('\n')
+	s.w.Write([]byte(sb.String())) //nolint:errcheck
 	s.flusher.Flush()
 }

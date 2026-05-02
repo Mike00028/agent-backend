@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/mike00028/golang-backend/services/api/internal/dag"
-	"github.com/mike00028/golang-backend/services/api/internal/planner"
+	"github.com/mike00028/golang-backend/services/api/internal/llm"
 )
 
 // -- Structured output model ---------------------------------------------------
@@ -21,26 +21,26 @@ type evalOutput struct {
 
 // -- Evaluator -----------------------------------------------------------------
 
-// Evaluator satisfies dag.EvaluatorClient using Ollama structured output.
+// Evaluator satisfies dag.EvaluatorClient using an llm.Client for structured output.
 type Evaluator struct {
-	ollama *planner.OllamaClient
+	client llm.Client
 	model  string
 }
 
-// NewEvaluator creates an Evaluator. It satisfies dag.EvaluatorClient.
-func NewEvaluator(ollama *planner.OllamaClient, model string) *Evaluator {
-	return &Evaluator{ollama: ollama, model: model}
+// NewEvaluator creates an Evaluator backed by any llm.Client.
+func NewEvaluator(client llm.Client, model string) *Evaluator {
+	return &Evaluator{client: client, model: model}
 }
 
 // Eval implements dag.EvaluatorClient.
 func (e *Evaluator) Eval(ctx context.Context, req dag.GoEvalRequest) (*dag.EvalResult, error) {
-	messages := []planner.Message{
+	messages := []llm.Message{
 		{Role: "system", Content: buildEvalSystemPrompt()},
 		{Role: "user", Content: buildEvalUserMessage(req)},
 	}
 
 	var out evalOutput
-	if err := e.ollama.ChatInto(ctx, e.model, messages, &out); err != nil {
+	if err := e.client.ChatInto(ctx, e.model, messages, &out); err != nil {
 		return nil, fmt.Errorf("evaluator LLM failed: %w", err)
 	}
 
@@ -55,15 +55,17 @@ func (e *Evaluator) Eval(ctx context.Context, req dag.GoEvalRequest) (*dag.EvalR
 // -- Prompt builders -----------------------------------------------------------
 
 func buildEvalSystemPrompt() string {
-	return `You are a strict evaluator for an AI agent system.
+	return `You are an evaluator for an AI agent system.
 You will receive a user goal and a list of completed tasks with their outputs.
 Assess whether the task results collectively fulfill the user goal.
 
 Rules:
-- Set eval_ok = true only if the outputs fully and correctly address the user goal.
+- Set eval_ok = false ONLY when a required task failed with an error OR a clearly mandatory part of the user goal is completely missing from all outputs.
+- Set eval_ok = true when the outputs address the user's intent, even if phrasing or formatting could be improved.
 - Set score between 0.0 (total failure) and 1.0 (perfect).
 - If eval_ok = false, provide specific, actionable feedback on what is missing or wrong.
-- Keep the summary concise (one sentence) suitable for the end user.`
+- Keep the summary concise (one sentence) suitable for the end user.
+- Do NOT set eval_ok = false just because the answer could be more detailed or polished.`
 }
 
 func buildEvalUserMessage(req dag.GoEvalRequest) string {

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,13 +16,23 @@ type Config struct {
 	GRPCTimeout    time.Duration
 	GinMode        string
 
+	// LLM provider — "gemini" or "ollama" (default)
+	LLMProvider  string
+	GeminiAPIKey string
+
 	// Ollama (Go-native planner + evaluator + embeddings)
 	OllamaBaseURL string
 	PlannerModel  string
+	ChatModel     string // tool execution: chat_agent, summarize_agent
 	EvalModel     string
 	EmbedModel    string
 
-	// Postgres (DAG checkpointing + memory)
+	// Agent spec
+	AgentSystemPrompt string
+	AgentMaxIter      int
+	AgentTools        []string
+
+	// Postgres — conversations, MCP tools, agent registry (optional for local dev)
 	PostgresDSN string
 
 	// DAG orchestration tuning
@@ -35,19 +47,28 @@ type Config struct {
 	OTELServiceName      string
 }
 
-// Load reads configuration from environment variables with sensible defaults.
-func Load() Config {
-	return Config{
+// Load reads configuration from environment variables.
+// Returns an error if any required variable is missing.
+func Load() (Config, error) {
+	cfg := Config{
 		HTTPAddr:       getEnv("HTTP_ADDR", ":8080"),
 		PythonGRPCAddr: getEnv("PYTHON_GRPC_ADDR", "localhost:50051"),
 		GRPCPoolSize:   getEnvInt("GRPC_POOL_SIZE", 5),
 		GRPCTimeout:    getEnvDuration("GRPC_TIMEOUT_MS", 5000) * time.Millisecond,
 		GinMode:        getEnv("GIN_MODE", "debug"),
 
+		LLMProvider:  getEnv("LLM_PROVIDER", "gemini"),
+		GeminiAPIKey: getEnv("GEMINI_API_KEY", ""),
+
 		OllamaBaseURL: getEnv("OLLAMA_BASE_URL", "http://localhost:11434"),
-		PlannerModel:  getEnv("PLANNER_MODEL", "qwen2.5:7b"),
-		EvalModel:     getEnv("EVAL_MODEL", "qwen2.5:7b"),
+		PlannerModel:  os.Getenv("PLANNER_MODEL"),
+		ChatModel:     os.Getenv("CHAT_MODEL"),
+		EvalModel:     os.Getenv("EVAL_MODEL"),
 		EmbedModel:    getEnv("EMBED_MODEL", "nomic-embed-text"),
+
+		AgentSystemPrompt: getEnv("AGENT_SYSTEM_PROMPT", "You are a helpful assistant."),
+		AgentMaxIter:      getEnvInt("AGENT_MAX_ITERATIONS", 3),
+		AgentTools:        strings.Fields(getEnv("AGENT_TOOLS", "chat_agent math_agent rag_agent summarize_agent text_agent")),
 
 		PostgresDSN: getEnv("POSTGRES_DSN", ""),
 
@@ -60,6 +81,22 @@ func Load() Config {
 		LangfuseSecretKey:    getEnv("LANGFUSE_SECRET_KEY", ""),
 		OTELServiceName:      getEnv("OTEL_SERVICE_NAME", "go-orchestrator"),
 	}
+
+	var missing []string
+	for _, req := range []struct{ name, val string }{
+		{"PLANNER_MODEL", cfg.PlannerModel},
+		{"CHAT_MODEL", cfg.ChatModel},
+		{"EVAL_MODEL", cfg.EvalModel},
+	} {
+		if req.val == "" {
+			missing = append(missing, req.name)
+		}
+	}
+	if len(missing) > 0 {
+		return Config{}, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
+	}
+
+	return cfg, nil
 }
 
 func getEnv(key, fallback string) string {

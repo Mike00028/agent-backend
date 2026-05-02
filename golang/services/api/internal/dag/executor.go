@@ -10,18 +10,24 @@ import (
 	"time"
 
 	langgraphv1 "github.com/mike00028/golang-backend/services/api/internal/langgraphv1/langgraph/v1"
+	"github.com/mike00028/golang-backend/services/api/internal/telemetry"
 )
 
 const (
-	maxTaskRetries  = 3
-	taskRetryBaseMs = 1000 // exponential backoff: 1s, 2s, 4s
-	taskTimeoutSec  = 30
+	maxTaskRetries       = 3
+	taskRetryBaseMs      = 1000 // exponential backoff: 1s, 2s, 4s
+	localTaskTimeoutSec  = 180  // Go/Ollama handlers: LLM can be slow locally
+	remoteTaskTimeoutSec = 60   // Python gRPC handlers
 )
 
 // PythonClient is a subset of the gRPC client used by the executor.
 type PythonClient interface {
 	ExecuteTask(ctx context.Context, req *langgraphv1.TaskRequest) (langgraphv1.AgentService_ExecuteTaskClient, error)
 }
+
+// LocalTaskFunc handles a task entirely in Go without a Python gRPC call.
+// Return the string result or an error.
+type LocalTaskFunc func(ctx context.Context, task *Task) (string, error)
 
 // TaskMiddleware is called before each task execution attempt (including retries).
 // Returning a non-nil error skips this attempt and counts as a task failure.
@@ -30,20 +36,31 @@ type TaskMiddleware func(ctx context.Context, task *Task) error
 
 // Executor runs a single batch of tasks in parallel and collects their results.
 type Executor struct {
-	client     PythonClient
-	checkpoint CheckpointWriter
-	events     chan<- SSEEvent  // forwarded to SSE stream
-	middleware []TaskMiddleware // runs before each task attempt
+	client        PythonClient
+	checkpoint    CheckpointWriter
+	events        chan<- SSEEvent
+	middleware    []TaskMiddleware
+	localHandlers map[string]LocalTaskFunc
+	tracer        telemetry.Tracer
 }
 
 // NewExecutor creates an Executor.
 func NewExecutor(client PythonClient, cp CheckpointWriter, events chan<- SSEEvent) *Executor {
-	return &Executor{client: client, checkpoint: cp, events: events}
+	return &Executor{client: client, checkpoint: cp, events: events, tracer: telemetry.NewTracer("dag.executor")}
 }
 
 // AddMiddleware registers a hook that runs before each task execution attempt.
 func (e *Executor) AddMiddleware(fn TaskMiddleware) {
 	e.middleware = append(e.middleware, fn)
+}
+
+// RegisterLocal registers a Go-native handler for a specific tool_name.
+// When a task matches, Go handles it directly — no Python gRPC round-trip.
+func (e *Executor) RegisterLocal(toolName string, fn LocalTaskFunc) {
+	if e.localHandlers == nil {
+		e.localHandlers = make(map[string]LocalTaskFunc)
+	}
+	e.localHandlers[toolName] = fn
 }
 
 // RunBatch executes all tasks in the batch concurrently.
@@ -66,13 +83,10 @@ func (e *Executor) RunBatch(ctx context.Context, dag *DAG, batch []*Task, result
 		t.Context = depCtx.String()
 	}
 
-	batchCtx, cancelBatch := context.WithCancel(ctx)
-	defer cancelBatch()
-
 	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		firstErr error
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		failed []string
 	)
 
 	for _, t := range batch {
@@ -80,29 +94,30 @@ func (e *Executor) RunBatch(ctx context.Context, dag *DAG, batch []*Task, result
 		go func(task *Task) {
 			defer wg.Done()
 
-			err := e.runTaskWithRetry(batchCtx, dag, task, results)
+			err := e.runTaskWithRetry(ctx, dag, task)
+			mu.Lock()
+			defer mu.Unlock()
 			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("task %s failed: %w", task.ID, err)
-					cancelBatch() // fail-fast: cancel siblings
-				}
-				mu.Unlock()
+				failed = append(failed, fmt.Sprintf("%s: %v", task.ID, err))
+				// Store the error as the task output so downstream tasks that
+				// depend on this one receive an error string rather than nothing.
+				results[task.ID] = fmt.Sprintf("[error] %v", err)
 			} else {
-				mu.Lock()
 				results[task.ID] = task.Output
-				mu.Unlock()
 			}
 		}(t)
 	}
 
 	wg.Wait()
-	return firstErr
+	if len(failed) > 0 {
+		return fmt.Errorf("tasks failed: %s", strings.Join(failed, "; "))
+	}
+	return nil
 }
 
 // runTaskWithRetry executes one task, retrying up to maxTaskRetries on transient failures.
 // task.Context must already be populated by RunBatch before this is called.
-func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task, results map[string]string) error {
+func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxTaskRetries; attempt++ {
 		if attempt > 0 {
@@ -130,19 +145,33 @@ func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task, r
 			continue
 		}
 
+		taskCtx, taskSpan := e.tracer.Start(ctx, "dag.task."+task.ToolName,
+			telemetry.StringAttr("task.id", task.ID),
+			telemetry.StringAttr("task.tool", task.ToolName),
+			telemetry.IntAttr("task.attempt", attempt),
+			telemetry.StringAttr("langfuse.input", task.ArgsJSON),
+		)
 		e.emit(SSEEvent{Type: "task_started", TaskID: task.ID, Payload: task.ToolName})
 		_ = e.checkpoint.SaveTaskStart(ctx, dag.SessionID, task)
 
-		err := e.streamTask(ctx, dag, task)
+		err := e.streamTask(taskCtx, dag, task)
 		if err == nil {
 			task.Status = StatusDone
 			task.DoneAt = time.Now()
+			taskSpan.SetAttr(
+				telemetry.IntAttr("output.bytes", len(task.Output)),
+				telemetry.StringAttr("langfuse.output", task.Output),
+			)
+			taskSpan.End()
 			_ = e.checkpoint.SaveTaskDone(ctx, dag.SessionID, task)
 			e.emit(SSEEvent{Type: "task_done", TaskID: task.ID, Payload: task.Output})
 			return nil
 		}
 
 		task.Error = err.Error()
+		taskSpan.RecordError(err)
+		taskSpan.SetError(err.Error())
+		taskSpan.End()
 		lastErr = err
 	}
 
@@ -153,9 +182,23 @@ func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task, r
 	return lastErr
 }
 
-// streamTask calls Python's ExecuteTask RPC and drains the event stream.
+// streamTask dispatches a task either to a Go-native local handler or to
+// Python's ExecuteTask RPC, depending on whether a local handler is registered.
 func (e *Executor) streamTask(ctx context.Context, dag *DAG, task *Task) error {
-	taskCtx, cancel := context.WithTimeout(ctx, taskTimeoutSec*time.Second)
+	// Local handlers run entirely in Go — zero Python round-trip.
+	if fn, ok := e.localHandlers[task.ToolName]; ok {
+		taskCtx, cancel := context.WithTimeout(ctx, localTaskTimeoutSec*time.Second)
+		defer cancel()
+		result, err := fn(taskCtx, task)
+		if err != nil {
+			return err
+		}
+		task.Output = result
+		e.emit(SSEEvent{Type: "task_progress", TaskID: task.ID, Payload: result})
+		return nil
+	}
+
+	taskCtx, cancel := context.WithTimeout(ctx, remoteTaskTimeoutSec*time.Second)
 	defer cancel()
 
 	stream, err := e.client.ExecuteTask(taskCtx, &langgraphv1.TaskRequest{
@@ -189,7 +232,11 @@ func (e *Executor) streamTask(ctx context.Context, dag *DAG, task *Task) error {
 			outputParts = append(outputParts, ev.Payload)
 			e.emit(SSEEvent{Type: "task_progress", TaskID: task.ID, Payload: ev.Payload})
 		case "done":
-			outputParts = append(outputParts, ev.Payload)
+			// Only use done.payload if no text events were received yet;
+			// prevents double-encoding when Python sends text then done with same payload.
+			if len(outputParts) == 0 && ev.Payload != "" {
+				outputParts = append(outputParts, ev.Payload)
+			}
 		}
 	}
 

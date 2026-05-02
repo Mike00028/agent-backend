@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 
 	langgraphv1 "github.com/mike00028/golang-backend/services/api/internal/langgraphv1/langgraph/v1"
+	"github.com/mike00028/golang-backend/services/api/internal/telemetry"
 )
 
 const maxRefinementGeneration = 2
@@ -50,6 +52,12 @@ type EvaluatorClient interface {
 	Eval(ctx context.Context, req GoEvalRequest) (*EvalResult, error)
 }
 
+// SummarizerClient synthesizes multiple task outputs into one response.
+// Implemented by internal/planner.OllamaSummarizer.
+type SummarizerClient interface {
+	Summarize(ctx context.Context, userMessage string, taskOutputs []string) (string, error)
+}
+
 // -- Orchestrator --------------------------------------------------------------
 
 // BeforePlanFunc is called before every planning attempt.
@@ -61,14 +69,44 @@ type BeforePlanFunc func(ctx context.Context, req *GoPlanRequest) error
 type Orchestrator struct {
 	planner    PlannerClient
 	evaluator  EvaluatorClient
+	summarizer SummarizerClient
 	executor   *Executor
 	checkpoint CheckpointWriter
 	beforePlan []BeforePlanFunc
+	events     chan<- SSEEvent
+	tracer     telemetry.Tracer
 }
 
 // NewOrchestrator creates an Orchestrator.
 func NewOrchestrator(planner PlannerClient, evaluator EvaluatorClient, executor *Executor, cp CheckpointWriter) *Orchestrator {
-	return &Orchestrator{planner: planner, evaluator: evaluator, executor: executor, checkpoint: cp}
+	return &Orchestrator{
+		planner:    planner,
+		evaluator:  evaluator,
+		executor:   executor,
+		checkpoint: cp,
+		tracer:     telemetry.NewTracer("dag.orchestrator"),
+	}
+}
+
+// SetSummarizer attaches a Go-native summarizer (backed by Ollama).
+func (o *Orchestrator) SetSummarizer(s SummarizerClient) {
+	o.summarizer = s
+}
+
+// SetEvents attaches the SSE event channel so the orchestrator can emit
+// plan_ready before task execution begins.
+func (o *Orchestrator) SetEvents(ch chan<- SSEEvent) {
+	o.events = ch
+}
+
+func (o *Orchestrator) emit(ev SSEEvent) {
+	if o.events == nil {
+		return
+	}
+	select {
+	case o.events <- ev:
+	default:
+	}
 }
 
 // AddBeforePlan registers a hook that runs before every PlanDAG call.
@@ -101,6 +139,14 @@ func (o *Orchestrator) Run(ctx context.Context, req RunRequest) (*RunResult, err
 }
 
 func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen int, feedback string) (*RunResult, error) {
+	ctx, span := o.tracer.Start(ctx, fmt.Sprintf("dag.generation.%d", gen),
+		telemetry.StringAttr("langfuse.session.id", req.SessionID),
+		telemetry.StringAttr("langfuse.user.id", req.UserID),
+		telemetry.StringAttr("agent.id", req.AgentID),
+		telemetry.IntAttr("generation", gen),
+	)
+	defer span.End()
+
 	// -- Step 1: Plan -----------------------------------------------------------
 	planReq := GoPlanRequest{
 		SessionID:     req.SessionID,
@@ -117,10 +163,52 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 			return nil, fmt.Errorf("before-plan hook rejected request: %w", err)
 		}
 	}
-	planResult, err := o.planner.Plan(ctx, planReq)
-	if err != nil {
-		return nil, fmt.Errorf("planner failed (gen=%d): %w", gen, err)
+	var planResult *GoPlanResult
+	{
+		pctx, pspan := o.tracer.Start(ctx, "dag.plan",
+			telemetry.StringAttr("langfuse.input", req.Message),
+		)
+		var perr error
+		planResult, perr = o.planner.Plan(pctx, planReq)
+		if perr != nil {
+			pspan.RecordError(perr)
+			pspan.SetError(perr.Error())
+			pspan.End()
+			return nil, fmt.Errorf("planner failed (gen=%d): %w", gen, perr)
+		}
+		planJSON, _ := json.Marshal(planResult.Tasks)
+		pspan.SetAttr(
+			telemetry.IntAttr("task.count", len(planResult.Tasks)),
+			telemetry.StringAttr("langfuse.output", string(planJSON)),
+		)
+		pspan.End()
 	}
+
+	// Emit plan_ready immediately so the frontend shows task identifiers
+	// before the (potentially slow) execution phase begins.
+	type planTask struct {
+		ID            string   `json:"id"`
+		Title         string   `json:"title"`
+		Tool          string   `json:"tool"`
+		DepsOn        []string `json:"depends_on"`
+		ExecutionMode string   `json:"execution_mode"`
+	}
+	planTasks := make([]planTask, len(planResult.Tasks))
+	for i, t := range planResult.Tasks {
+		planTasks[i] = planTask{
+			ID:            t.ID,
+			Title:         t.Title,
+			Tool:          t.ToolName,
+			DepsOn:        t.DependsOn,
+			ExecutionMode: t.ExecutionMode,
+		}
+	}
+	planPayload, _ := json.Marshal(map[string]interface{}{
+		"generation": gen,
+		"reasoning":  planResult.Reasoning,
+		"tasks":      planTasks,
+	})
+	o.emit(SSEEvent{Type: "plan_ready", Payload: string(planPayload)})
 
 	// -- Step 2: Build DAG with stable IDs -------------------------------------
 	dagID := fmt.Sprintf("%s/g%d", req.SessionID, gen)
@@ -173,6 +261,7 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 	// Python tools are expected to be idempotent.
 
 	// -- Step 6: Execute batches (skip already-done tasks) --------------------
+	var batchErrors []string
 	for _, batch := range batches {
 		// Filter to only tasks that are not yet done.
 		pending := batch[:0]
@@ -184,43 +273,112 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 		if len(pending) == 0 {
 			continue
 		}
-		if err := o.executor.RunBatch(ctx, d, pending, results); err != nil {
-			return nil, fmt.Errorf("batch execution failed (gen=%d): %w", gen, err)
+		bctx, bspan := o.tracer.Start(ctx, fmt.Sprintf("dag.execute_batch.%d", len(batchErrors)),
+			telemetry.IntAttr("tasks.pending", len(pending)),
+		)
+		if berr := o.executor.RunBatch(bctx, d, pending, results); berr != nil {
+			bspan.RecordError(berr)
+			bspan.SetError(berr.Error())
+			batchErrors = append(batchErrors, berr.Error())
 		}
+		bspan.End()
+	}
+	// If every task failed and we have nothing to show, surface the error.
+	if len(results) == 0 && len(batchErrors) > 0 {
+		return nil, fmt.Errorf("all tasks failed: %s", strings.Join(batchErrors, "; "))
 	}
 
-	// -- Step 7: Evaluate -------------------------------------------------------
-	eval, err := o.evaluator.Eval(ctx, GoEvalRequest{
+	// -- Step 7: Auto-summarize via Go Ollama (no gRPC) ----------------------
+	// If more than one task ran and the planner didn't already include a
+	// summarize_agent task, synthesize all outputs into one response in Go.
+	finalOutput := o.autoSummarize(ctx, req.Message, d.Tasks, results)
+
+	// -- Step 8: Evaluate -------------------------------------------------------
+	ectx, espan := o.tracer.Start(ctx, "dag.eval",
+		telemetry.StringAttr("langfuse.input", req.Message),
+	)
+	eval, err := o.evaluator.Eval(ectx, GoEvalRequest{
 		SessionID:   req.SessionID,
 		UserMessage: req.Message,
 		Tasks:       d.Tasks,
 	})
 	if err != nil {
+		espan.RecordError(err)
 		eval = &EvalResult{EvalOK: false, Score: 0.5, Feedback: fmt.Sprintf("eval error: %s", err)}
+	} else {
+		espan.SetAttr(
+			telemetry.BoolAttr("eval.ok", eval.EvalOK),
+			telemetry.Float64Attr("eval.score", eval.Score),
+			telemetry.StringAttr("langfuse.output", eval.Summary),
+		)
 	}
+	espan.End()
 
-	// -- Step 8: Refine or return -----------------------------------------------
-	if !eval.EvalOK {
+	// -- Step 9: Refine or return -----------------------------------------------
+	// Only trigger a refinement cycle when the evaluator is truly unhappy
+	// (score < 0.5). A strict eval_ok=false with a high score just means the
+	// LLM evaluator is being cautious — not worth re-running everything.
+	if !eval.EvalOK && eval.Score < 0.5 {
 		if gen < maxRefinementGeneration {
 			return o.runGeneration(ctx, req, gen+1, eval.Feedback)
 		}
 		score, reason := calculateConfidence(*eval, gen)
-		dagOutputJSON, _ := json.Marshal(results)
 		return &RunResult{
-			FinalOutput:      string(dagOutputJSON),
+			FinalOutput:      finalOutput,
 			ConfidenceScore:  score,
 			ConfidenceReason: reason,
 			EvalOK:           false,
 		}, nil
 	}
 
-	dagOutputJSON, _ := json.Marshal(results)
 	return &RunResult{
-		FinalOutput:      string(dagOutputJSON),
+		FinalOutput:      finalOutput,
 		ConfidenceScore:  eval.Score,
 		ConfidenceReason: eval.Summary,
 		EvalOK:           true,
 	}, nil
+}
+
+// autoSummarize calls the Go-native summarizer when multiple tasks ran.
+// Falls back to simple concatenation if no summarizer is set or the call fails.
+func (o *Orchestrator) autoSummarize(ctx context.Context, userMessage string, tasks []*Task, results map[string]string) string {
+	// If the planner already added a summarize_agent task, use its output.
+	for _, t := range tasks {
+		if t.ToolName == "summarize_agent" {
+			if out, ok := results[t.ID]; ok && out != "" {
+				return out
+			}
+		}
+	}
+
+	// Collect non-empty, non-debug outputs in plan order.
+	var outputs []string
+	for _, t := range tasks {
+		if t.ToolName == "inspect_agent" || t.ToolName == "summarize_agent" {
+			continue
+		}
+		if out, ok := results[t.ID]; ok && out != "" {
+			outputs = append(outputs, out)
+		}
+	}
+
+	if len(outputs) == 0 {
+		raw, _ := json.Marshal(results)
+		return string(raw)
+	}
+	if len(outputs) == 1 {
+		return outputs[0]
+	}
+
+	// Multiple results: call the Go-native LLM summarizer.
+	if o.summarizer != nil {
+		if summary, err := o.summarizer.Summarize(ctx, userMessage, outputs); err == nil && summary != "" {
+			return summary
+		}
+	}
+
+	// Fallback: plain join.
+	return strings.Join(outputs, "\n\n")
 }
 
 // -- Helpers -------------------------------------------------------------------

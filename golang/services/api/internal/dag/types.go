@@ -17,11 +17,13 @@ const (
 
 // Task is a single node in the DAG.
 type Task struct {
-	ID        string   // e.g. "t1", "t2"
-	ToolName  string   // MCP tool to invoke
-	ArgsJSON  string   // JSON arguments for the tool
-	DependsOn []string // IDs of tasks that must complete first
-	Context   string   // Dependency outputs injected at dispatch time
+	ID            string   // e.g. "t1", "t2"
+	Title         string   // Human-readable task title
+	ToolName      string   // MCP tool to invoke
+	ArgsJSON      string   // JSON arguments for the tool
+	DependsOn     []string // IDs of tasks that must complete first
+	ExecutionMode string   // "parallel" or "sequential"
+	Context       string   // Dependency outputs injected at dispatch time
 
 	// Execution state (mutated by executor)
 	Status     TaskStatus
