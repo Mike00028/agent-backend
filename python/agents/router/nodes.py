@@ -17,7 +17,6 @@ import time
 from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
-from agents.math.math_tools import add, divide, multiply, subtract
 from agents.rag.retriever import InMemoryEmbeddingRetriever
 from providers.interfaces import ChatProvider
 
@@ -241,38 +240,36 @@ def build_executor_node(
       task has 'question'        â†’ generic LLM call
     """
 
-    _TOOL_MAP = {
-        "+": ("add", add),
-        "-": ("subtract", subtract),
-        "*": ("multiply", multiply),
-        "/": ("divide", divide),
-    }
-
     async def _exec_math(expr: str) -> tuple[str, list, list]:
         expressions = _math_exprs(expr)
         if not expressions:
             return "Unable to parse math expression.", [], []
-        tool_calls: list[dict[str, Any]] = []
-        tool_results: list[dict[str, Any]] = []
         results: list[str] = []
-        for idx, expression in enumerate(expressions, start=1):
+        for expression in expressions:
             a_str, op, b_str = _parse_expr(expression)
             if not a_str:
                 results.append("Unable to parse math expression.")
                 continue
-            tool_name, tool_fn = _TOOL_MAP.get(op, ("", None))
-            if tool_fn is None:
-                results.append("Unsupported operator.")
-                continue
-            call_id = f"call_math_{idx}"
             try:
-                value = tool_fn.invoke({"a": float(a_str), "b": float(b_str)})
-            except ValueError as exc:
-                value = f"Error: {exc}"
-            results.append(str(value))
-            tool_calls.append({"id": call_id, "name": tool_name, "args": {"a": float(a_str), "b": float(b_str)}})
-            tool_results.append({"tool_call_id": call_id, "content": str(value)})
-        return "\n".join(results), tool_calls, tool_results
+                a, b = float(a_str), float(b_str)
+                if op == "+":
+                    value = a + b
+                elif op == "-":
+                    value = a - b
+                elif op == "*":
+                    value = a * b
+                elif op == "/":
+                    if b == 0:
+                        results.append("Error: division by zero")
+                        continue
+                    value = a / b
+                else:
+                    results.append("Unsupported operator.")
+                    continue
+                results.append(str(int(value) if value == int(value) else value))
+            except (ValueError, OverflowError) as exc:
+                results.append(f"Error: {exc}")
+        return "\n".join(results), [], []
 
     async def _exec_rag(question: str, model: str, options: dict, system_prompt: str) -> tuple[str, list, list]:
         docs = await retriever.retrieve(question)

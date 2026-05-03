@@ -27,13 +27,19 @@ func Logger() gin.HandlerFunc {
 		latency := time.Since(start)
 		status := c.Writer.Status()
 
-		span.SetAttr(
+		attrs := []telemetry.Attr{
 			telemetry.StringAttr("http.method", c.Request.Method),
 			telemetry.StringAttr("http.path", c.Request.URL.Path),
 			telemetry.IntAttr("http.status_code", status),
 			telemetry.StringAttr("http.client_ip", c.ClientIP()),
 			telemetry.Int64Attr("http.latency_ms", latency.Milliseconds()),
-		)
+		}
+		if v, ok := c.Get("langfuse.input"); ok {
+			if s, ok := v.(string); ok && s != "" {
+				attrs = append(attrs, telemetry.StringAttr("langfuse.input", s))
+			}
+		}
+		span.SetAttr(attrs...)
 		if status >= 500 {
 			span.SetError(c.Errors.String())
 		}

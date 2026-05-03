@@ -161,16 +161,17 @@ func (c *Client) Chat(ctx context.Context, model string, messages []llm.Message,
 
 	output := result.Candidates[0].Content.Parts[0].Text
 
-	// Build a concise input string from the last user message for Langfuse UI.
-	inputText := ""
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			inputText = messages[i].Content
-			break
-		}
+	// Format full prompt for Langfuse input — system + user messages are both
+	// valuable for debugging; only recording the last user message hides the
+	// system prompt entirely, making it impossible to understand agent behaviour.
+	var inputParts []string
+	for _, m := range messages {
+		inputParts = append(inputParts, "["+m.Role+"]: "+m.Content)
 	}
+	inputText := strings.Join(inputParts, "\n\n")
 
 	span.SetAttr(
+		telemetry.StringAttr("gen_ai.request.model", model),
 		telemetry.IntAttr("gen_ai.usage.input_tokens", result.UsageMetadata.PromptTokenCount),
 		telemetry.IntAttr("gen_ai.usage.output_tokens", result.UsageMetadata.CandidatesTokenCount),
 		telemetry.IntAttr("gen_ai.usage.thoughts_tokens", result.UsageMetadata.ThoughtsTokenCount),

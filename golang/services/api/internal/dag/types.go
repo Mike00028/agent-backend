@@ -23,7 +23,8 @@ type Task struct {
 	ArgsJSON      string   // JSON arguments for the tool
 	DependsOn     []string // IDs of tasks that must complete first
 	ExecutionMode string   // "parallel" or "sequential"
-	Context       string   // Dependency outputs injected at dispatch time
+	Context       string   // Dependency outputs as human-readable text (for LLM agents)
+	DepResults    map[string]string // Raw dependency outputs keyed by task ID (for Go-local agents)
 
 	// Execution state (mutated by executor)
 	Status     TaskStatus

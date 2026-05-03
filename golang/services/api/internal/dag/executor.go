@@ -17,7 +17,7 @@ const (
 	maxTaskRetries       = 3
 	taskRetryBaseMs      = 1000 // exponential backoff: 1s, 2s, 4s
 	localTaskTimeoutSec  = 180  // Go/Ollama handlers: LLM can be slow locally
-	remoteTaskTimeoutSec = 60   // Python gRPC handlers
+	remoteTaskTimeoutSec = 180  // Python gRPC handlers: ReAct loops need multiple LLM round-trips
 )
 
 // PythonClient is a subset of the gRPC client used by the executor.
@@ -75,12 +75,27 @@ func (e *Executor) RunBatch(ctx context.Context, dag *DAG, batch []*Task, result
 	// Must happen before goroutines launch; no concurrent writes are in flight yet.
 	for _, t := range batch {
 		var depCtx strings.Builder
+		// Only inject prior dependency outputs — each agent receives its own
+		// scoped sub-query via args.question set by the planner.
+		// Injecting the full user message here would re-expose every agent to
+		// unrelated parts of a multi-task query (violates single responsibility).
 		for _, depID := range t.DependsOn {
 			if out, ok := results[depID]; ok {
 				depCtx.WriteString(fmt.Sprintf("[%s result]: %s\n", depID, out))
 			}
 		}
 		t.Context = depCtx.String()
+		// Also store raw dep outputs for Go-local agents (e.g. math_agent)
+		// so they don't need to parse the text format.
+		if len(t.DependsOn) > 0 {
+			deps := make(map[string]string, len(t.DependsOn))
+			for _, depID := range t.DependsOn {
+				if out, ok := results[depID]; ok {
+					deps[depID] = out
+				}
+			}
+			t.DepResults = deps
+		}
 	}
 
 	var (
@@ -148,8 +163,10 @@ func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task) e
 		taskCtx, taskSpan := e.tracer.Start(ctx, "dag.task."+task.ToolName,
 			telemetry.StringAttr("task.id", task.ID),
 			telemetry.StringAttr("task.tool", task.ToolName),
+			telemetry.StringAttr("task.title", task.Title),
+			telemetry.StringAttr("langfuse.session.id", dag.SessionID),
 			telemetry.IntAttr("task.attempt", attempt),
-			telemetry.StringAttr("langfuse.input", task.ArgsJSON),
+			telemetry.StringAttr("langfuse.input", taskInputForTrace(task)),
 		)
 		e.emit(SSEEvent{Type: "task_started", TaskID: task.ID, Payload: task.ToolName})
 		_ = e.checkpoint.SaveTaskStart(ctx, dag.SessionID, task)
@@ -201,11 +218,29 @@ func (e *Executor) streamTask(ctx context.Context, dag *DAG, task *Task) error {
 	taskCtx, cancel := context.WithTimeout(ctx, remoteTaskTimeoutSec*time.Second)
 	defer cancel()
 
+	// Safety net: if the planner failed to populate args.question, inject the
+	// full user message so the agent always has something concrete to work from.
+	// Which agents need this is declared in AgentRegistry (NeedsQuestion field)
+	// — no hardcoded agent-name checks here.
+	argsJSON := task.ArgsJSON
+	if def, ok := AgentByName(task.ToolName); ok && def.NeedsQuestion && dag.UserMessage != "" {
+		var a map[string]interface{}
+		if err := json.Unmarshal([]byte(argsJSON), &a); err == nil {
+			q, _ := a["question"].(string)
+			if q == "" {
+				a["question"] = dag.UserMessage
+				if b, err := json.Marshal(a); err == nil {
+					argsJSON = string(b)
+				}
+			}
+		}
+	}
+
 	stream, err := e.client.ExecuteTask(taskCtx, &langgraphv1.TaskRequest{
 		SessionId: dag.SessionID,
 		TaskId:    task.ID,
 		ToolName:  task.ToolName,
-		ArgsJson:  task.ArgsJSON,
+		ArgsJson:  argsJSON,
 		Context:   task.Context,
 		AgentId:   dag.AgentID,
 	})
@@ -255,4 +290,27 @@ func (e *Executor) emit(ev SSEEvent) {
 	case e.events <- ev:
 	default: // non-blocking; drop if consumer is slow
 	}
+}
+
+// taskInputForTrace builds a human-readable input string for the Langfuse
+// dag.task span. It extracts args.question / args.expr from the raw JSON
+// so the trace shows the actual question the agent received, not raw JSON.
+func taskInputForTrace(task *Task) string {
+	var args struct {
+		Question string `json:"question"`
+		Expr     string `json:"expr"`
+	}
+	if err := json.Unmarshal([]byte(task.ArgsJSON), &args); err != nil {
+		return task.ArgsJSON // fallback to raw JSON if parsing fails
+	}
+	if args.Question != "" {
+		if task.Context != "" {
+			return task.Context + "\n" + args.Question
+		}
+		return args.Question
+	}
+	if args.Expr != "" {
+		return "expr: " + args.Expr
+	}
+	return task.ArgsJSON
 }

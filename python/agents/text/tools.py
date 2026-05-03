@@ -3,55 +3,46 @@ from __future__ import annotations
 
 import re
 
+from langchain_core.tools import tool
 
-VOWELS = set("aeiouAEIOU")
 
-
-def count_vowels(text: str) -> dict:
-    """Count vowels in text. Returns total and per-vowel breakdown."""
+@tool
+def count_vowels(text: str) -> str:
+    """Count the vowels (a, e, i, o, u) in the given text. Returns total count and per-vowel breakdown."""
+    vowels = set("aeiouAEIOU")
     breakdown: dict[str, int] = {}
     for ch in text:
-        if ch in VOWELS:
+        if ch in vowels:
             key = ch.lower()
             breakdown[key] = breakdown.get(key, 0) + 1
-    return {
-        "total": sum(breakdown.values()),
-        "breakdown": breakdown,
-        "input_length": len(text),
-    }
+    total = sum(breakdown.values())
+    parts = ", ".join(f"{k}={v}" for k, v in sorted(breakdown.items()))
+    return f"{total} vowels ({parts}) in {len(text)} characters"
 
 
-def count_consonants(text: str) -> dict:
-    """Count consonants (letters that are not vowels) in text."""
+@tool
+def count_consonants(text: str) -> str:
+    """Count the consonants (non-vowel letters) in the given text. Returns total count and per-letter breakdown."""
+    vowels = set("aeiouAEIOU")
     breakdown: dict[str, int] = {}
     for ch in text:
-        if ch.isalpha() and ch not in VOWELS:
+        if ch.isalpha() and ch not in vowels:
             key = ch.lower()
             breakdown[key] = breakdown.get(key, 0) + 1
-    return {
-        "total": sum(breakdown.values()),
-        "breakdown": breakdown,
-        "input_length": len(text),
-    }
+    total = sum(breakdown.values())
+    parts = ", ".join(f"{k}={v}" for k, v in sorted(breakdown.items()))
+    return f"{total} consonants ({parts}) in {len(text)} characters"
 
 
-def count_word(word: str, paragraph: str) -> dict:
-    """Count how many times `word` appears in `paragraph` (case-insensitive, whole-word)."""
+@tool
+def count_word_occurrences(word: str, paragraph: str) -> str:
+    """Count how many times a specific word appears in a paragraph (case-insensitive, whole-word match)."""
     if not word.strip():
-        return {"error": "word must not be empty", "count": 0}
+        return "Error: word must not be empty"
     pattern = re.compile(r'\b' + re.escape(word.strip()) + r'\b', re.IGNORECASE)
-    matches = pattern.findall(paragraph)
-    return {
-        "word": word.strip(),
-        "count": len(matches),
-        "paragraph_length": len(paragraph),
-        "word_count": len(paragraph.split()),
-    }
+    count = len(pattern.findall(paragraph))
+    word_count = len(paragraph.split())
+    return f"'{word}' appears {count} time(s) in a {word_count}-word paragraph"
 
 
-# Tool dispatch table used by the node
-TOOL_MAP = {
-    "count_vowels":    count_vowels,
-    "count_consonants": count_consonants,
-    "count_word":      count_word,
-}
+TEXT_TOOLS = [count_vowels, count_consonants, count_word_occurrences]

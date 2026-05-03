@@ -61,9 +61,17 @@ func schemaOfStruct(t reflect.Type) JSONSchema {
 		if jsonTag == "" || jsonTag == "-" {
 			continue
 		}
-		name := strings.Split(jsonTag, ",")[0]
+		parts := strings.Split(jsonTag, ",")
+		name := parts[0]
 		if name == "" {
 			continue
+		}
+		optional := false
+		for _, opt := range parts[1:] {
+			if opt == "omitempty" {
+				optional = true
+				break
+			}
 		}
 
 		fieldSchema := schemaOfType(field.Type)
@@ -72,7 +80,9 @@ func schemaOfStruct(t reflect.Type) JSONSchema {
 		}
 
 		props[name] = fieldSchema
-		required = append(required, name)
+		if !optional {
+			required = append(required, name)
+		}
 	}
 
 	return JSONSchema{

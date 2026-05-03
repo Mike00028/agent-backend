@@ -39,14 +39,44 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gen"))
 from langgraph.v1 import agent_pb2, agent_pb2_grpc  # type: ignore[import-not-found]
 from agents.router.graph import RouterState, build_graph as build_router_graph
 from agents.rag.graph import RagState, build_graph as build_rag_graph
-from agents.chat.graph import ChatState, build_graph as build_chat_graph
-from agents.summarize.graph import SummarizeState, build_graph as build_summarize_graph
-from agents.text.graph import TextState, build_graph as build_text_graph
+from agents.text.graph import build_graph as build_text_graph
 from agents.rag.retriever import InMemoryEmbeddingRetriever
 from config import load
 from providers import LLMProvider
 
 _log = logging.getLogger("servicer")
+
+# ─── Langfuse tracing ────────────────────────────────────────────────────────
+# Langfuse v4 uses OTel auto-instrumentation — initialising the client is enough
+# to trace every LangChain/LangGraph LLM call, tool call, and token count.
+try:
+    from langfuse import Langfuse as _Langfuse
+    _lf_public = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    _lf_secret = os.getenv("LANGFUSE_SECRET_KEY", "")
+    _lf_host   = os.getenv("LANGFUSE_HOST", "").rstrip("/") or None
+    if _lf_public and _lf_secret:
+        _lf_client = _Langfuse(
+            public_key=_lf_public,
+            secret_key=_lf_secret,
+            host=_lf_host,
+        )
+        def _lf_run_config(session_id: str, task_id: str, tool_name: str) -> dict:
+            """Return a LangGraph run_config that tags this invocation in Langfuse."""
+            trace = _lf_client.trace(
+                name=f"{tool_name}/{task_id}",
+                session_id=session_id,
+                tags=[tool_name, task_id],
+            )
+            return {"run_name": f"{tool_name}/{task_id}", "metadata": {"langfuse_trace_id": trace.id, "session_id": session_id}}
+        _log.info("Langfuse tracing enabled host=%s", _lf_host or "cloud")
+    else:
+        _lf_client = None  # type: ignore[assignment]
+        _lf_run_config = None  # type: ignore[assignment]
+        _log.info("Langfuse tracing disabled (LANGFUSE_PUBLIC_KEY/SECRET_KEY not set)")
+except ImportError:
+    _lf_client = None  # type: ignore[assignment]
+    _lf_run_config = None  # type: ignore[assignment]
+    _log.warning("langfuse not installed — poetry add langfuse")
 
 _cfg = load()
 _semaphore = asyncio.Semaphore(_cfg.grpc_max_concurrent)
@@ -70,28 +100,22 @@ _graph = build_router_graph(
 )
 
 # Specialist graphs — used by ExecuteTask (Go DAG executor calls these directly)
+# chat_agent, math_agent, summarize_agent are Go-local handlers — not registered here.
 _rag_graph = build_rag_graph(
     chat_provider=_chat_provider,
     retriever=_retriever,
     default_model=_cfg.llm_model,
 )
-_chat_graph = build_chat_graph(
+_text_graph = build_text_graph(
     chat_provider=_chat_provider,
     default_model=_cfg.llm_model,
 )
-_summarize_graph = build_summarize_graph(
-    chat_provider=_chat_provider,
-    default_model=_cfg.llm_model,
-)
-_text_graph = build_text_graph()
 
 # Maps tool_name → graph
 # Go planner is told to use exactly these names.
 _AGENT_REGISTRY: dict = {
-    "rag_agent":       _rag_graph,
-    "chat_agent":      _chat_graph,
-    "summarize_agent": _summarize_graph,
-    "text_agent":      _text_graph,
+    "rag_agent":  _rag_graph,
+    "text_agent": _text_graph,
 }
 
 
@@ -416,20 +440,23 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
               try:
                 graph = _AGENT_REGISTRY.get(tool_name)
                 if graph is None:
-                    # Fallback: use chat_agent for anything unknown
-                    if args.get("retrieve"):
-                        graph = _rag_graph
-                        tool_name = "rag_agent"
-                    else:
-                        graph = _chat_graph
-                        tool_name = "chat_agent"
-                    _log.warning(
-                        '{"event":"execute_task.fallback","session_id":"%s","task_id":"%s","resolved_to":"%s"}',
-                        session_id, task_id, tool_name,
+                    await context.abort(
+                        grpc.StatusCode.NOT_FOUND,
+                        f"tool '{tool_name}' is not handled by Python (it may be a Go-local agent)",
                     )
+                    return
 
-                # Build the state for whichever agent was selected
+                # Build the state for whichever agent was selected.
+                # args.question holds the per-task sub-query set by the planner.
+                # ctx_text contains only "[tN result]: ..." lines from prior tasks
+                # (the executor no longer injects [user message] here).
                 question = str(args.get("question") or args.get("query") or args.get("message") or ctx_text or "")
+
+                _log.info(
+                    '{"event":"execute_task.input","task_id":"%s","tool":"%s","question":%s}',
+                    task_id, tool_name, json.dumps(question[:300]),
+                )
+
                 if tool_name == "rag_agent":
                     state = {
                         "session_id": session_id,
@@ -439,47 +466,62 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                         "retrieved_context": "",
                         "result": "",
                     }
-                elif tool_name == "summarize_agent":
-                    # ctx_text is Go-injected dependency outputs: "[t1 result]: ...\n[t2 result]: ..."
-                    original_question = str(args.get("question", ""))
-                    state = {
-                        "session_id": session_id,
-                        "question": original_question,
-                        "context": ctx_text,
-                        "model": model,
-                        "options": {},
-                        "result": "",
-                    }
                 elif tool_name == "text_agent":
-                    state = {
-                        "session_id": session_id,
-                        "task_id":    task_id,
-                        "tool_name":  str(args.get("tool", "")),
-                        "args":       args,
-                        "context":    ctx_text,
-                        "result":     "",
-                    }
-                else:  # chat_agent
-                    system_prompt = str(args.get("system_prompt", _cfg.system_prompt or ""))
-                    messages = []
-                    if system_prompt:
-                        messages.append({"role": "system", "content": system_prompt})
-                    # Prepend dependency outputs so the agent can use prior results.
+                    # Prepend prior dependency results when present (sequential tasks).
                     user_content = f"{ctx_text}\n{question}".strip() if ctx_text else question
-                    messages.append({"role": "user", "content": user_content})
                     state = {
-                        "session_id": session_id,
-                        "messages": messages,
-                        "model": model,
-                        "options": {},
-                        "result": "",
+                        "messages": [{"role": "user", "content": user_content}],
                     }
+                else:
+                    await context.abort(
+                        grpc.StatusCode.NOT_FOUND,
+                        f"tool '{tool_name}' is not handled by Python",
+                    )
+                    return
 
                 output = await asyncio.wait_for(
-                    graph.ainvoke(state),
+                    graph.ainvoke(
+                        state,
+                        config=_lf_run_config(session_id, task_id, tool_name) if _lf_run_config else {},
+                    ),
                     timeout=_cfg.executor_timeout_seconds,
                 )
-                result = str(output.get("result", ""))
+
+                # Log every tool call made during the ReAct loop.
+                # AIMessage.tool_calls = [{"name": "...", "args": {...}, "id": "..."}]
+                if "messages" in output:
+                    for msg in output["messages"]:
+                        calls = getattr(msg, "tool_calls", None)
+                        if calls:
+                            for tc in calls:
+                                _log.info(
+                                    '{"event":"tool_call","task_id":"%s","tool":"%s","args":%s}',
+                                    task_id,
+                                    tc.get("name", "?"),
+                                    json.dumps(tc.get("args", {})),
+                                )
+
+                # create_react_agent returns {"messages": [...]} — last AI message is the answer.
+                # Other agents return {"result": "..."}.
+                if "messages" in output and "result" not in output:
+                    msgs = output["messages"]
+                    last = msgs[-1] if msgs else None
+                    if last is None:
+                        result = ""
+                    elif hasattr(last, "content"):
+                        content = last.content
+                        # Gemini may return a list of content parts
+                        if isinstance(content, list):
+                            result = " ".join(
+                                p.get("text", str(p)) if isinstance(p, dict) else str(p)
+                                for p in content
+                            )
+                        else:
+                            result = str(content)
+                    else:
+                        result = str(last)
+                else:
+                    result = str(output.get("result", ""))
 
                 _log.info(
                     '{"event":"execute_task.done","session_id":"%s","task_id":"%s","agent":"%s"}',

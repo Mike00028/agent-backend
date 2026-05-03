@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/mike00028/golang-backend/services/api/internal/agentstore"
+	"github.com/mike00028/golang-backend/services/api/internal/apperror"
 	"github.com/mike00028/golang-backend/services/api/internal/dag"
 	"github.com/mike00028/golang-backend/services/api/internal/evaluator"
 	"github.com/mike00028/golang-backend/services/api/internal/grpcclient"
@@ -78,6 +79,7 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 		return
 	}
 	h.normalise(c, &req)
+	c.Set("langfuse.input", req.Message)
 
 	streamEnabled := true
 	if req.Stream != nil {
@@ -90,7 +92,7 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 
 	sse, ok := pkgsse.New(c.Writer)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
+		c.JSON(http.StatusInternalServerError, apperror.New(apperror.CodeInternal, "Streaming is not supported by this client.", http.StatusInternalServerError))
 		return
 	}
 	sse.SendEvent("open", "[STREAM_START]")
@@ -107,7 +109,7 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 
 	runReq, spec, err := h.buildRunRequest(ctx, req)
 	if err != nil {
-		sse.SendEvent("error", err.Error())
+		sseError(sse, apperror.Classify(err))
 		return
 	}
 
@@ -134,8 +136,9 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 
 	select {
 	case err := <-errCh:
-		log.Printf("dag.error session_id=%s err=%v", req.SessionID, err)
-		sse.SendEvent("error", err.Error())
+		ae := apperror.Classify(err)
+		log.Printf("dag.error session_id=%s code=%s detail=%s", req.SessionID, ae.Code, ae.Detail)
+		sseError(sse, ae)
 	case result := <-resultCh:
 		log.Printf("dag.done session_id=%s eval_ok=%v score=%.2f", req.SessionID, result.EvalOK, result.ConfidenceScore)
 		span.SetAttr(
@@ -164,6 +167,7 @@ func (h *ChatHandler) Invoke(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	c.Set("langfuse.input", req.Message)
 	h.invoke(c, req)
 }
 
@@ -182,7 +186,8 @@ func (h *ChatHandler) invoke(c *gin.Context, req chatRequest) {
 
 	runReq, spec, err := h.buildRunRequest(ctx, req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		ae := apperror.Classify(err)
+		httpError(c, ae)
 		return
 	}
 
@@ -197,7 +202,9 @@ func (h *ChatHandler) invoke(c *gin.Context, req chatRequest) {
 	result, err := orch.Run(ctx, runReq)
 	close(events)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("DAG execution failed: %v", err)})
+		ae := apperror.Classify(err)
+		log.Printf("dag.error session_id=%s code=%s detail=%s", req.SessionID, ae.Code, ae.Detail)
+		httpError(c, ae)
 		return
 	}
 
@@ -299,17 +306,26 @@ func (h *ChatHandler) buildOrchestrator(
 			SystemPrompt string `json:"system_prompt"`
 		}
 		_ = json.Unmarshal([]byte(task.ArgsJSON), &args)
+		// Use the planner-scoped sub-query; fall back to full user message only
+		// when the planner failed to populate args.question.
 		question := args.Question
 		if question == "" {
-			question = task.Context
+			question = userMessage
 		}
-		if question == "" {
-			question = userMessage // planner forgot to set args.question — fall back to raw input
+		// Prepend upstream dependency results (e.g. prior math/text outputs)
+		// so the LLM can reference them. task.Context now contains ONLY
+		// [tN result] lines — never the full user message.
+		if task.Context != "" {
+			question = task.Context + "\n" + question
 		}
 		sys := args.SystemPrompt
 		if sys == "" {
 			sys = spec.SystemPrompt
 		}
+		// Ensure chat_agent is always concise — never writes tutorials or long explanations.
+		// The planner may inject a more specific system prompt via args.system_prompt.
+		const concisenessRule = " Be concise. Answer in 1-3 sentences maximum. Do not write tutorials, code examples, or lengthy explanations unless explicitly asked."
+		sys += concisenessRule
 		msgs := []llm.Message{}
 		if sys != "" {
 			msgs = append(msgs, llm.Message{Role: "system", Content: sys})
@@ -318,29 +334,39 @@ func (h *ChatHandler) buildOrchestrator(
 		return ollamaExec.Chat(localCtx, chatModel, msgs, nil)
 	})
 
-	// math_agent: evaluate arithmetic expressions directly in Go
+	// math_agent: evaluate arithmetic expressions directly in Go.
+	// Resolves {tN} placeholders from task.DepResults (typed map) — not by
+	// parsing the text context string, which could contain false matches.
 	executor.RegisterLocal("math_agent", func(localCtx context.Context, task *dag.Task) (string, error) {
 		var args struct {
 			Expr string `json:"expr"`
 		}
 		_ = json.Unmarshal([]byte(task.ArgsJSON), &args)
-		expr := args.Expr
-		if expr == "" {
-			expr = task.Context
-		}
+		expr := resolveFromDepResults(args.Expr, task.DepResults)
 		return evalMathExpr(expr)
 	})
 
 	// summarize_agent: synthesize multiple task outputs via Go Ollama call
 	executor.RegisterLocal("summarize_agent", func(localCtx context.Context, task *dag.Task) (string, error) {
+		// task.Context contains "[t1 result]: ...\n[t2 result]: ..." from RunBatch.
+		// Pass the original user message (not args.question — the planner may not
+		// populate it for summarize_agent) so the synthesizer knows the full intent.
+		s := planner.NewSummarizer(ollamaExec, chatModel)
+		return s.Summarize(localCtx, userMessage, []string{task.Context})
+	})
+
+	// clarify_agent: zero-latency passthrough — outputs args.question directly to
+	// the user without any LLM call. Used by the planner when required inputs are
+	// genuinely missing (e.g. user asked to analyse text but provided no text).
+	executor.RegisterLocal("clarify_agent", func(_ context.Context, task *dag.Task) (string, error) {
 		var args struct {
 			Question string `json:"question"`
 		}
 		_ = json.Unmarshal([]byte(task.ArgsJSON), &args)
-		question := args.Question
-		// task.Context contains "[t1 result]: ...\n[t2 result]: ..." injected by RunBatch
-		s := planner.NewSummarizer(ollamaExec, chatModel)
-		return s.Summarize(localCtx, question, []string{task.Context})
+		if args.Question == "" {
+			return "Please provide the missing inputs.", nil
+		}
+		return args.Question, nil
 	})
 
 	// HITL middleware: pause tasks whose tools are in approval_required_tools.
@@ -415,6 +441,35 @@ func (h *ChatHandler) maybeFlushMemory(userID, sessionID string, result *dag.Run
 			log.Printf("memory.write warn session_id=%s err=%v", sessionID, err)
 		}
 	}()
+}
+
+// resolveFromDepResults substitutes {tN} and bare tN placeholders in expr
+// with values from the typed DepResults map (keyed by task ID).
+// This replaces the old text-parsing approach (resolveFromContext) which was
+// fragile — any agent output containing "[tN result]: 99" would corrupt math.
+func resolveFromDepResults(expr string, deps map[string]string) string {
+	if len(deps) == 0 {
+		return expr
+	}
+	// Replace {tN} first (unambiguous).
+	resolved := regexp.MustCompile(`\{([^}]+)\}`).ReplaceAllStringFunc(expr, func(tok string) string {
+		id := tok[1 : len(tok)-1]
+		// Extract leading numeric value from the dep output (e.g. "5328" from "5328\n...")
+		if raw, ok := deps[id]; ok {
+			if m := regexp.MustCompile(`-?\d+(?:\.\d+)?`).FindString(raw); m != "" {
+				return m
+			}
+		}
+		return tok
+	})
+	// Then replace bare word-boundary task IDs (e.g. "t1 + 56").
+	for id, raw := range deps {
+		if m := regexp.MustCompile(`-?\d+(?:\.\d+)?`).FindString(raw); m != "" {
+			re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(id) + `\b`)
+			resolved = re.ReplaceAllString(resolved, m)
+		}
+	}
+	return resolved
 }
 
 // evalMathExpr evaluates a simple "a op b" arithmetic expression and returns the result as a string.

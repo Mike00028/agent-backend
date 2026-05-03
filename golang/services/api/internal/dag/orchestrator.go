@@ -388,7 +388,10 @@ func validateDAG(d *DAG, agentSpecJSON string) error {
 		return nil
 	}
 	var spec struct {
-		Tools []string `json:"tools"`
+		Tools     []string `json:"tools"`
+		SubAgents []struct {
+			Name string `json:"name"`
+		} `json:"sub_agents"`
 	}
 	if err := json.Unmarshal([]byte(agentSpecJSON), &spec); err != nil {
 		return fmt.Errorf("invalid agent_spec_json: %w", err)
@@ -396,11 +399,20 @@ func validateDAG(d *DAG, agentSpecJSON string) error {
 	if len(spec.Tools) == 0 {
 		return nil
 	}
-	allowed := make(map[string]bool, len(spec.Tools))
+	allowed := make(map[string]bool, len(spec.Tools)+len(spec.SubAgents))
 	for _, t := range spec.Tools {
 		allowed[t] = true
 	}
+	// Custom agents loaded from DB live in sub_agents, not tools.
+	for _, sa := range spec.SubAgents {
+		allowed[sa.Name] = true
+	}
 	for _, task := range d.Tasks {
+		// Built-in agents from the static registry are always permitted —
+		// they are system-level tools, not user-configured spec tools.
+		if _, isBuiltin := AgentByName(task.ToolName); isBuiltin {
+			continue
+		}
 		if !allowed[task.ToolName] {
 			return fmt.Errorf("task %s uses tool %q which is not in agent spec", task.ID, task.ToolName)
 		}

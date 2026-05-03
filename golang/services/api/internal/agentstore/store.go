@@ -9,6 +9,12 @@ import (
 // ErrNotFound is returned when the agent_id does not exist.
 var ErrNotFound = errors.New("agent not found")
 
+// SubAgentDef describes a custom (DB-loaded) agent available to the planner.
+type SubAgentDef struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 // AgentSpec is the canonical agent configuration.
 type AgentSpec struct {
 	ID          string
@@ -23,7 +29,7 @@ type AgentSpec struct {
 	EvalModel    string
 
 	Tools     []string
-	SubAgents []string
+	SubAgents []SubAgentDef // custom agents available in addition to the built-in registry
 
 	ApprovalRequiredTools []string
 	EvaluatorEnabled      bool
@@ -69,10 +75,10 @@ func (s *Store) Load(_ context.Context, _, _ string) (*AgentSpec, error) {
 // ToSpecJSON serialises the AgentSpec to the JSON form consumed by the planner.
 func (s *AgentSpec) ToSpecJSON() string {
 	type specJSON struct {
-		Tools        []string `json:"tools"`
-		SubAgents    []string `json:"sub_agents,omitempty"`
-		SystemPrompt string   `json:"system_prompt"`
-		AgentType    string   `json:"agent_type"`
+		Tools        []string      `json:"tools"`
+		SubAgents    []SubAgentDef `json:"sub_agents,omitempty"`
+		SystemPrompt string        `json:"system_prompt"`
+		AgentType    string        `json:"agent_type"`
 	}
 	b, _ := json.Marshal(specJSON{
 		Tools:        s.Tools,

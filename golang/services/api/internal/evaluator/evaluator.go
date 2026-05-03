@@ -61,6 +61,8 @@ Assess whether the task results collectively fulfill the user goal.
 
 Rules:
 - Set eval_ok = false ONLY when a required task failed with an error OR a clearly mandatory part of the user goal is completely missing from all outputs.
+- For tasks with tool=text_agent, tool=rag_agent, or tool=math_agent: if the output is a clarification request (contains phrases like "please provide", "could you clarify", "I need more information", "please share the paragraph"), set eval_ok = false — these agents must execute against whatever text is available, not ask for more.
+- For tasks with tool=clarify_agent or tool=chat_agent that output a clarification question to the user (e.g. "please provide the paragraph", "which word should I count"), treat this as eval_ok = true with score = 0.9 — asking for genuinely missing information is correct behaviour and must not trigger a refinement loop.
 - Set eval_ok = true when the outputs address the user's intent, even if phrasing or formatting could be improved.
 - Set score between 0.0 (total failure) and 1.0 (perfect).
 - If eval_ok = false, provide specific, actionable feedback on what is missing or wrong.
