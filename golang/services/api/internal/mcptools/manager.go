@@ -17,6 +17,26 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
+// mcpStore is the storage interface used by Manager. *Store satisfies this.
+type mcpStore interface {
+	ListServers(ctx context.Context) ([]Server, error)
+	UpsertServer(ctx context.Context, srv Server) (string, error)
+	SetServerSyncStatus(ctx context.Context, serverID string, syncErr string) error
+	UpsertTool(ctx context.Context, serverID string, tool ToolDef) (changed bool, err error)
+	SetToolEmbedding(ctx context.Context, serverID, toolName string, embedding []float32) error
+	RemoveStaleTools(ctx context.Context, serverID string, currentNames []string) error
+	SearchTools(ctx context.Context, query string, queryEmbedding []float32, limit int) ([]Tool, error)
+	ListAllTools(ctx context.Context) ([]Tool, error)
+	LogToolCall(ctx context.Context, toolID, sessionID, taskID string, input, output json.RawMessage, status, errMsg string, durationMs int) error
+}
+
+// mcpClient is the transport interface used by Manager. *Client satisfies this.
+type mcpClient interface {
+	ListTools(ctx context.Context) ([]ToolDef, error)
+	CallTool(ctx context.Context, toolName string, args json.RawMessage) (*ToolCallResult, error)
+	Close()
+}
+
 // OllamaEmbedder calls Ollama's /api/embeddings endpoint.
 type OllamaEmbedder struct {
 	url    string
@@ -64,18 +84,21 @@ func (e *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 // Manager coordinates MCP server syncing, tool retrieval, and tool execution.
 // It holds a pool of MCP clients keyed by server name.
 type Manager struct {
-	store    *Store
-	embedder Embedder
-	mu       sync.RWMutex
-	clients  map[string]*Client // keyed by server name
+	store     mcpStore
+	embedder  Embedder
+	mu        sync.RWMutex
+	clients   map[string]mcpClient // keyed by server name
+	syncReady chan struct{}         // closed after first SyncAll completes
+	syncOnce  sync.Once
 }
 
 // NewManager creates a new MCP tool manager.
-func NewManager(store *Store, embedder Embedder) *Manager {
+func NewManager(store mcpStore, embedder Embedder) *Manager {
 	return &Manager{
-		store:    store,
-		embedder: embedder,
-		clients:  make(map[string]*Client),
+		store:     store,
+		embedder:  embedder,
+		clients:   make(map[string]mcpClient),
+		syncReady: make(chan struct{}),
 	}
 }
 
@@ -141,8 +164,24 @@ func (m *Manager) syncServer(ctx context.Context, srv Server) error {
 	return nil
 }
 
+// Ready returns a channel that is closed once the first SyncAll completes.
+// Use this to wait for tool discovery before querying.
+func (m *Manager) Ready() <-chan struct{} {
+	return m.syncReady
+}
+
 // SearchTools performs hybrid search for tools matching a query.
+// It waits for the first sync to complete so it never returns empty results
+// due to a race between startup and the first user request.
 func (m *Manager) SearchTools(ctx context.Context, query string, limit int) ([]Tool, error) {
+	// Wait for initial sync — typically instant after the first request;
+	// only blocks during the cold-start window.
+	select {
+	case <-m.syncReady:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	if m.embedder == nil {
 		return m.store.ListAllTools(ctx)
 	}
@@ -156,7 +195,14 @@ func (m *Manager) SearchTools(ctx context.Context, query string, limit int) ([]T
 }
 
 // CallTool finds the right MCP client and calls the tool.
+// It waits for the first sync so the client map is populated.
 func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, args json.RawMessage) (*ToolCallResult, error) {
+	select {
+	case <-m.syncReady:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	m.mu.RLock()
 	client, ok := m.clients[serverName]
 	m.mu.RUnlock()
@@ -194,16 +240,20 @@ func (m *Manager) Close() {
 	for _, c := range m.clients {
 		c.Close()
 	}
-	m.clients = make(map[string]*Client)
+	m.clients = make(map[string]mcpClient)
 }
 
 // StartPeriodicSync runs SyncAll every interval until ctx is cancelled.
+// The first SyncAll blocks internal callers (SearchTools, CallTool) via Ready().
 func (m *Manager) StartPeriodicSync(ctx context.Context, interval time.Duration) {
 	go func() {
 		// Initial sync on startup
 		if err := m.SyncAll(ctx); err != nil {
 			slog.Warn("mcp initial sync failed", "error", err)
 		}
+		// Signal that the first sync is done regardless of error.
+		// Callers unblock and see whatever tools were successfully stored.
+		m.syncOnce.Do(func() { close(m.syncReady) })
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -221,7 +271,7 @@ func (m *Manager) StartPeriodicSync(ctx context.Context, interval time.Duration)
 }
 
 // getOrCreateClient returns a cached client or creates a new one.
-func (m *Manager) getOrCreateClient(srv Server) *Client {
+func (m *Manager) getOrCreateClient(srv Server) mcpClient {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
