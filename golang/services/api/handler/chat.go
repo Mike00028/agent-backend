@@ -20,6 +20,7 @@ import (
 	"github.com/mike00028/golang-backend/services/api/internal/hitl"
 	langgraphv1 "github.com/mike00028/golang-backend/services/api/internal/langgraphv1/langgraph/v1"
 	"github.com/mike00028/golang-backend/services/api/internal/llm"
+	"github.com/mike00028/golang-backend/services/api/internal/mcptools"
 	"github.com/mike00028/golang-backend/services/api/internal/memory"
 	"github.com/mike00028/golang-backend/services/api/internal/planner"
 	pkgsse "github.com/mike00028/golang-backend/services/api/internal/sse"
@@ -42,6 +43,7 @@ type ChatHandler struct {
 	agentStore *agentstore.Store
 	memorySvc  *memory.Service
 	hitlStore  *hitl.Store
+	mcpMgr     *mcptools.Manager
 	llmClient  llm.Client
 	planModel  string
 	chatModel  string // tool execution: chat_agent, summarize_agent
@@ -55,6 +57,7 @@ func NewChatHandler(
 	agentStore *agentstore.Store,
 	memorySvc *memory.Service,
 	hitlStore *hitl.Store,
+	mcpMgr *mcptools.Manager,
 	client llm.Client,
 	planModel, chatModel, evalModel string,
 ) *ChatHandler {
@@ -64,6 +67,7 @@ func NewChatHandler(
 		agentStore: agentStore,
 		memorySvc:  memorySvc,
 		hitlStore:  hitlStore,
+		mcpMgr:     mcpMgr,
 		llmClient:  client,
 		planModel:  planModel,
 		chatModel:  chatModel,
@@ -102,7 +106,8 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 	ctx, span := telemetry.NewTracer("handler").Start(ctx, "chat.stream")
 	defer span.End()
 	span.SetAttr(
-		telemetry.StringAttr("langfuse.input", req.Message),
+		telemetry.StringAttr("langfuse.trace.input", req.Message),
+		telemetry.StringAttr("langfuse.observation.input", req.Message),
 		telemetry.StringAttr("langfuse.session.id", req.SessionID),
 		telemetry.StringAttr("langfuse.user.id", req.UserID),
 	)
@@ -142,7 +147,8 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 	case result := <-resultCh:
 		log.Printf("dag.done session_id=%s eval_ok=%v score=%.2f", req.SessionID, result.EvalOK, result.ConfidenceScore)
 		span.SetAttr(
-			telemetry.StringAttr("langfuse.output", result.FinalOutput),
+			telemetry.StringAttr("langfuse.trace.output", result.FinalOutput),
+			telemetry.StringAttr("langfuse.observation.output", result.FinalOutput),
 			telemetry.BoolAttr("eval.ok", result.EvalOK),
 			telemetry.Float64Attr("eval.score", result.ConfidenceScore),
 		)
@@ -179,7 +185,8 @@ func (h *ChatHandler) invoke(c *gin.Context, req chatRequest) {
 	ctx, span := telemetry.NewTracer("handler").Start(ctx, "chat.invoke")
 	defer span.End()
 	span.SetAttr(
-		telemetry.StringAttr("langfuse.input", req.Message),
+		telemetry.StringAttr("langfuse.trace.input", req.Message),
+		telemetry.StringAttr("langfuse.observation.input", req.Message),
 		telemetry.StringAttr("langfuse.session.id", req.SessionID),
 		telemetry.StringAttr("langfuse.user.id", req.UserID),
 	)
@@ -210,7 +217,8 @@ func (h *ChatHandler) invoke(c *gin.Context, req chatRequest) {
 
 	h.maybeFlushMemory(req.UserID, req.SessionID, result, spec)
 	span.SetAttr(
-		telemetry.StringAttr("langfuse.output", result.FinalOutput),
+		telemetry.StringAttr("langfuse.trace.output", result.FinalOutput),
+		telemetry.StringAttr("langfuse.observation.output", result.FinalOutput),
 		telemetry.BoolAttr("eval.ok", result.EvalOK),
 		telemetry.Float64Attr("eval.score", result.ConfidenceScore),
 	)
@@ -369,6 +377,11 @@ func (h *ChatHandler) buildOrchestrator(
 		return args.Question, nil
 	})
 
+	// mcp_agent: invoke external MCP tools discovered via hybrid search
+	if h.mcpMgr != nil {
+		mcptools.RegisterMCPHandler(executor, h.mcpMgr)
+	}
+
 	// HITL middleware: pause tasks whose tools are in approval_required_tools.
 	// In streaming mode: emit a hitl_approval_required SSE event then block until
 	// a human calls POST /agent/approve.  In non-streaming mode: fail fast with a
@@ -501,4 +514,22 @@ func evalMathExpr(expr string) (string, error) {
 		return strconv.FormatInt(int64(result), 10), nil
 	}
 	return strconv.FormatFloat(result, 'f', -1, 64), nil
+}
+
+// sseError sends a structured error event over an SSE stream.
+// The Detail field (internal cause) is logged server-side but never sent to the client.
+func sseError(sse *pkgsse.Writer, ae *apperror.AppError) {
+	payload, _ := json.Marshal(map[string]string{
+		"code":    string(ae.Code),
+		"message": ae.Message,
+	})
+	sse.SendEvent("error", string(payload))
+}
+
+// httpError writes a structured JSON error response for non-streaming endpoints.
+func httpError(c *gin.Context, ae *apperror.AppError) {
+	c.JSON(ae.HTTPStatus, gin.H{
+		"code":    string(ae.Code),
+		"message": ae.Message,
+	})
 }

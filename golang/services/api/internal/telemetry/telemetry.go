@@ -13,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -56,6 +57,13 @@ func Init(ctx context.Context, serviceName, endpoint, publicKey, secretKey strin
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 	)
 	otel.SetTracerProvider(tp)
+	// Register W3C TraceContext + Baggage propagators so that Go→Python gRPC
+	// calls carry the distributed trace context and Python spans become children
+	// of the Go span in the same Langfuse trace.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 	// Point the factory at the OTel adapter so all subsequent NewTracer() calls
 	// return a live exporting tracer.
 	SetFactory(otelFactory)
@@ -66,4 +74,3 @@ func Init(ctx context.Context, serviceName, endpoint, publicKey, secretKey strin
 		return tp.Shutdown(shutdownCtx)
 	}, nil
 }
-

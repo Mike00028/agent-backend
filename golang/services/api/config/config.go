@@ -76,7 +76,7 @@ func Load() (Config, error) {
 		MessageBatchThreshold:   getEnvInt("MESSAGE_BATCH_THRESHOLD", 15),
 		MemoryFlushIntervalSec:  getEnvInt("MEMORY_FLUSH_INTERVAL_SEC", 1800),
 
-		LangfuseOTLPEndpoint: getEnv("LANGFUSE_OTLP_ENDPOINT", "http://localhost:4318"),
+		LangfuseOTLPEndpoint: getEnv("LANGFUSE_OTLP_ENDPOINT", ""),
 		LangfusePublicKey:    getEnv("LANGFUSE_PUBLIC_KEY", ""),
 		LangfuseSecretKey:    getEnv("LANGFUSE_SECRET_KEY", ""),
 		OTELServiceName:      getEnv("OTEL_SERVICE_NAME", "go-orchestrator"),

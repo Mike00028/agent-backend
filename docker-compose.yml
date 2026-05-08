@@ -160,10 +160,10 @@ services:
     volumes:
       - ./infra/otel/config.yaml:/etc/otel/config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "8888:8888"   # Collector metrics (Prometheus scrape endpoint)
-      - "13133:13133" # Health check extension
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8888:8888"   # Collector metrics (Prometheus scrape endpoint)
+      - "127.0.0.1:13133:13133" # Health check extension
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -180,7 +180,7 @@ services:
       <<: *langfuse-env
       NEXTAUTH_URL: ${LANGFUSE_URL}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       postgres:
         condition: service_healthy

@@ -22,15 +22,17 @@ import logging
 
 try:
     from opentelemetry import trace as otel_trace
+    from opentelemetry import propagate as otel_propagate
+    import opentelemetry.context as otel_ctx_api
     _tracer = otel_trace.get_tracer("python-agent")
 except Exception:
+    otel_trace = None  # type: ignore[assignment]
+    otel_propagate = None  # type: ignore[assignment]
+    otel_ctx_api = None  # type: ignore[assignment]
     _tracer = None  # type: ignore[assignment]
 
 
-class _null_span:
-    """No-op context manager used when OTel is not available."""
-    def __enter__(self): return None
-    def __exit__(self, *_): pass
+
 
 
 # Generated grpc stubs import from "langgraph.v1", so expose python/gen on sys.path.
@@ -43,6 +45,7 @@ from agents.text.graph import build_graph as build_text_graph
 from agents.rag.retriever import InMemoryEmbeddingRetriever
 from config import load
 from providers import LLMProvider
+from tracing import TracedGraph
 
 _log = logging.getLogger("servicer")
 
@@ -60,22 +63,12 @@ try:
             secret_key=_lf_secret,
             host=_lf_host,
         )
-        def _lf_run_config(session_id: str, task_id: str, tool_name: str) -> dict:
-            """Return a LangGraph run_config that tags this invocation in Langfuse."""
-            trace = _lf_client.trace(
-                name=f"{tool_name}/{task_id}",
-                session_id=session_id,
-                tags=[tool_name, task_id],
-            )
-            return {"run_name": f"{tool_name}/{task_id}", "metadata": {"langfuse_trace_id": trace.id, "session_id": session_id}}
         _log.info("Langfuse tracing enabled host=%s", _lf_host or "cloud")
     else:
         _lf_client = None  # type: ignore[assignment]
-        _lf_run_config = None  # type: ignore[assignment]
         _log.info("Langfuse tracing disabled (LANGFUSE_PUBLIC_KEY/SECRET_KEY not set)")
 except ImportError:
     _lf_client = None  # type: ignore[assignment]
-    _lf_run_config = None  # type: ignore[assignment]
     _log.warning("langfuse not installed — poetry add langfuse")
 
 _cfg = load()
@@ -93,29 +86,34 @@ _retriever = InMemoryEmbeddingRetriever(
 
 # ─── Agent graph registry ────────────────────────────────────────────────────
 # supervisor/router graph — used by RunAgent / StreamAgent
-_graph = build_router_graph(
-    chat_provider=_chat_provider,
-    retriever=_retriever,
-    default_model=_cfg.llm_model,
+_graph = TracedGraph(
+    build_router_graph(
+        chat_provider=_chat_provider,
+        retriever=_retriever,
+        default_model=_cfg.llm_model,
+    ),
+    "router_agent",
 )
 
 # Specialist graphs — used by ExecuteTask (Go DAG executor calls these directly)
 # chat_agent, math_agent, summarize_agent are Go-local handlers — not registered here.
-_rag_graph = build_rag_graph(
-    chat_provider=_chat_provider,
-    retriever=_retriever,
-    default_model=_cfg.llm_model,
-)
-_text_graph = build_text_graph(
-    chat_provider=_chat_provider,
-    default_model=_cfg.llm_model,
-)
-
-# Maps tool_name → graph
-# Go planner is told to use exactly these names.
-_AGENT_REGISTRY: dict = {
-    "rag_agent":  _rag_graph,
-    "text_agent": _text_graph,
+# Maps tool_name → TracedGraph  (Go planner uses exactly these names)
+_AGENT_REGISTRY: dict[str, TracedGraph] = {
+    "rag_agent": TracedGraph(
+        build_rag_graph(
+            chat_provider=_chat_provider,
+            retriever=_retriever,
+            default_model=_cfg.llm_model,
+        ),
+        "rag_agent",
+    ),
+    "text_agent": TracedGraph(
+        build_text_graph(
+            chat_provider=_chat_provider,
+            default_model=_cfg.llm_model,
+        ),
+        "text_agent",
+    ),
 }
 
 
@@ -428,16 +426,15 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
         yield agent_pb2.TaskEvent(type="started", payload=task_id)
 
         async with _semaphore:
-            span_ctx = _tracer.start_as_current_span(
-                f"agent.execute_task.{tool_name}",
-                attributes={
-                    "session.id": session_id,
-                    "task.id": task_id,
-                    "task.tool": tool_name,
-                }
-            ) if _tracer else _null_span()
-            with span_ctx as span:
-              try:
+            # Extract the W3C traceparent propagated by the Go executor so that
+            # Python spans become children of the Go dag.task.* span in Langfuse.
+            parent_ctx = None
+            if otel_propagate is not None:
+                grpc_md = dict(context.invocation_metadata())
+                parent_ctx = otel_propagate.extract(grpc_md)
+            ctx_token = otel_ctx_api.attach(parent_ctx) if (otel_ctx_api is not None and parent_ctx) else None
+
+            try:
                 graph = _AGENT_REGISTRY.get(tool_name)
                 if graph is None:
                     await context.abort(
@@ -480,10 +477,7 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                     return
 
                 output = await asyncio.wait_for(
-                    graph.ainvoke(
-                        state,
-                        config=_lf_run_config(session_id, task_id, tool_name) if _lf_run_config else {},
-                    ),
+                    graph.ainvoke(state),
                     timeout=_cfg.executor_timeout_seconds,
                 )
 
@@ -527,27 +521,24 @@ class AgentServicer(agent_pb2_grpc.AgentServiceServicer):
                     '{"event":"execute_task.done","session_id":"%s","task_id":"%s","agent":"%s"}',
                     session_id, task_id, tool_name,
                 )
-                if span:
-                    span.set_attribute("result.bytes", len(result))
                 yield agent_pb2.TaskEvent(type="text", payload=result)
                 yield agent_pb2.TaskEvent(type="done", payload=result)
 
-              except asyncio.TimeoutError:
+            except asyncio.TimeoutError:
                 msg = f"task {task_id} timed out after {_cfg.executor_timeout_seconds}s"
                 _log.warning(
                     '{"event":"execute_task.timeout","session_id":"%s","task_id":"%s"}',
                     session_id, task_id,
                 )
-                if span:
-                    span.set_status(otel_trace.StatusCode.ERROR, msg)
                 await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, msg)
 
-              except Exception as exc:
+            except Exception as exc:
                 _log.exception("execute_task error task_id=%s", task_id)
-                if span:
-                    span.record_exception(exc)
-                    span.set_status(otel_trace.StatusCode.ERROR, str(exc))
                 yield agent_pb2.TaskEvent(type="error", error=str(exc))
+            finally:
+                # Detach the parent OTel context propagated from Go via gRPC metadata.
+                if ctx_token is not None and otel_ctx_api is not None:
+                    otel_ctx_api.detach(ctx_token)
 
 
 def _is_valid_uuid(session_id: str) -> bool:

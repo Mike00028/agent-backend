@@ -17,6 +17,11 @@ type CheckpointWriter interface {
 	// the orchestrator pre-populates the results map and skips those tasks.
 	// Returns an empty map (not an error) when no prior progress exists.
 	LoadCompletedTasks(ctx context.Context, sessionID string, gen int) (map[string]string, error)
+
+	// DeleteSession removes the agent_sessions row (and all agent_task_nodes
+	// via CASCADE) once the DAG has fully completed. Call only on the final
+	// generation — not on intermediate refinement passes.
+	DeleteSession(ctx context.Context, sessionID string) error
 }
 
 // PgCheckpoint writes checkpoints to Postgres via pgx.
@@ -77,6 +82,12 @@ func (p *PgCheckpoint) SaveTaskFailed(ctx context.Context, sessionID string, t *
 		WHERE task_id = $1 AND node_id = $2`,
 		sessionID, t.ID, t.Error, durationMs, t.RetryCount,
 	)
+	return err
+}
+
+// DeleteSession deletes the agent_sessions row; CASCADE removes agent_task_nodes.
+func (p *PgCheckpoint) DeleteSession(ctx context.Context, sessionID string) error {
+	_, err := p.DB.Exec(ctx, `DELETE FROM agent_sessions WHERE id = $1`, sessionID)
 	return err
 }
 

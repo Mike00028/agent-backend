@@ -11,6 +11,9 @@ import (
 
 	langgraphv1 "github.com/mike00028/golang-backend/services/api/internal/langgraphv1/langgraph/v1"
 	"github.com/mike00028/golang-backend/services/api/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"google.golang.org/grpc/metadata"
 )
 
 const (
@@ -55,12 +58,41 @@ func (e *Executor) AddMiddleware(fn TaskMiddleware) {
 }
 
 // RegisterLocal registers a Go-native handler for a specific tool_name.
-// When a task matches, Go handles it directly — no Python gRPC round-trip.
+// Every handler is automatically wrapped with a generic tracing decorator that
+// records decoded input, output, and errors on a child span — individual
+// handlers stay completely free of tracing concerns.
 func (e *Executor) RegisterLocal(toolName string, fn LocalTaskFunc) {
 	if e.localHandlers == nil {
 		e.localHandlers = make(map[string]LocalTaskFunc)
 	}
-	e.localHandlers[toolName] = fn
+	e.localHandlers[toolName] = e.localTraceDecorator(toolName, fn)
+}
+
+// localTraceDecorator wraps a LocalTaskFunc with a child span that captures:
+// decoded input (question / expr), raw output, byte count, and any error.
+// Applied once at registration — zero per-handler boilerplate required.
+func (e *Executor) localTraceDecorator(toolName string, fn LocalTaskFunc) LocalTaskFunc {
+	return func(ctx context.Context, task *Task) (string, error) {
+		ctx, span := e.tracer.Start(ctx, "agent.invoke."+toolName,
+			telemetry.StringAttr("task.id", task.ID),
+			telemetry.StringAttr("task.tool", toolName),
+			telemetry.StringAttr("task.title", task.Title),
+			telemetry.StringAttr("langfuse.observation.input", taskInputForTrace(task)),
+		)
+		defer span.End()
+
+		output, err := fn(ctx, task)
+		if err != nil {
+			span.RecordError(err)
+			span.SetError(err.Error())
+			return "", err
+		}
+		span.SetAttr(
+			telemetry.StringAttr("langfuse.observation.output", output),
+			telemetry.IntAttr("output.bytes", len(output)),
+		)
+		return output, nil
+	}
 }
 
 // RunBatch executes all tasks in the batch concurrently.
@@ -166,7 +198,6 @@ func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task) e
 			telemetry.StringAttr("task.title", task.Title),
 			telemetry.StringAttr("langfuse.session.id", dag.SessionID),
 			telemetry.IntAttr("task.attempt", attempt),
-			telemetry.StringAttr("langfuse.input", taskInputForTrace(task)),
 		)
 		e.emit(SSEEvent{Type: "task_started", TaskID: task.ID, Payload: task.ToolName})
 		_ = e.checkpoint.SaveTaskStart(ctx, dag.SessionID, task)
@@ -175,9 +206,12 @@ func (e *Executor) runTaskWithRetry(ctx context.Context, dag *DAG, task *Task) e
 		if err == nil {
 			task.Status = StatusDone
 			task.DoneAt = time.Now()
+			// input/output/error details are recorded by the per-handler decorator
+			// (local) or by the Python servicer (remote). The lifecycle span only
+			// needs the final output for the Langfuse task observation.
 			taskSpan.SetAttr(
-				telemetry.IntAttr("output.bytes", len(task.Output)),
-				telemetry.StringAttr("langfuse.output", task.Output),
+				telemetry.StringAttr("langfuse.observation.input", taskInputForTrace(task)),
+				telemetry.StringAttr("langfuse.observation.output", task.Output),
 			)
 			taskSpan.End()
 			_ = e.checkpoint.SaveTaskDone(ctx, dag.SessionID, task)
@@ -234,6 +268,15 @@ func (e *Executor) streamTask(ctx context.Context, dag *DAG, task *Task) error {
 				}
 			}
 		}
+	}
+
+	// Propagate the current OTel trace context into gRPC metadata so that
+	// Python-side spans become children of this Go span in Langfuse.
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(taskCtx, carrier)
+	if len(carrier) > 0 {
+		md := metadata.New(map[string]string(carrier))
+		taskCtx = metadata.NewOutgoingContext(taskCtx, md)
 	}
 
 	stream, err := e.client.ExecuteTask(taskCtx, &langgraphv1.TaskRequest{

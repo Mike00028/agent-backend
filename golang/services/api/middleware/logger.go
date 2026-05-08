@@ -36,7 +36,7 @@ func Logger() gin.HandlerFunc {
 		}
 		if v, ok := c.Get("langfuse.input"); ok {
 			if s, ok := v.(string); ok && s != "" {
-				attrs = append(attrs, telemetry.StringAttr("langfuse.input", s))
+				attrs = append(attrs, telemetry.StringAttr("langfuse.trace.input", s))
 			}
 		}
 		span.SetAttr(attrs...)

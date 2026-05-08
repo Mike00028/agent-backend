@@ -175,8 +175,8 @@ func (c *Client) Chat(ctx context.Context, model string, messages []llm.Message,
 		telemetry.IntAttr("gen_ai.usage.input_tokens", result.UsageMetadata.PromptTokenCount),
 		telemetry.IntAttr("gen_ai.usage.output_tokens", result.UsageMetadata.CandidatesTokenCount),
 		telemetry.IntAttr("gen_ai.usage.thoughts_tokens", result.UsageMetadata.ThoughtsTokenCount),
-		telemetry.StringAttr("langfuse.input", inputText),
-		telemetry.StringAttr("langfuse.output", output),
+		telemetry.StringAttr("langfuse.observation.input", inputText),
+		telemetry.StringAttr("langfuse.observation.output", output),
 	)
 
 	return output, nil

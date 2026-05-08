@@ -24,11 +24,14 @@ def _init_otel() -> None:
     if not endpoint:
         return
     try:
-        from opentelemetry import trace
+        from opentelemetry import trace, propagate
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.sdk.resources import Resource, SERVICE_NAME
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.propagators.composite import CompositeHTTPPropagator
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+        from opentelemetry.baggage.propagation import W3CBaggagePropagator
         import base64
 
         headers = {}
@@ -43,6 +46,14 @@ def _init_otel() -> None:
         provider = TracerProvider(resource=resource)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
+
+        # Register W3C TraceContext propagator so Go→Python gRPC trace context
+        # (traceparent header injected by Go executor) is correctly extracted
+        # and Python spans become children of Go spans in the same Langfuse trace.
+        propagate.set_global_textmap(CompositeHTTPPropagator([
+            TraceContextTextMapPropagator(),
+            W3CBaggagePropagator(),
+        ]))
         logging.getLogger(__name__).info("OTel tracing enabled endpoint=%s", endpoint)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).warning("OTel init failed: %s", exc)

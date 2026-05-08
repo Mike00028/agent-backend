@@ -48,6 +48,12 @@ var AgentRegistry = []AgentDef{
 		IsLocal:       true,
 		NeedsQuestion: true,
 	},
+	{
+		Name:          "mcp_agent",
+		Description:   `invokes an external MCP tool; use when no built-in agent fits — args: {"question":"<what to do>"} for auto-selection, or {"server":"<name>","tool_name":"<name>","tool_args":{...}} for direct invocation`,
+		IsLocal:       true,
+		NeedsQuestion: true,
+	},
 }
 
 // AgentByName returns the AgentDef for the given name, and whether it was found.

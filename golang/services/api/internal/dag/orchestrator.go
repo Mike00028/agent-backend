@@ -166,7 +166,7 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 	var planResult *GoPlanResult
 	{
 		pctx, pspan := o.tracer.Start(ctx, "dag.plan",
-			telemetry.StringAttr("langfuse.input", req.Message),
+			telemetry.StringAttr("langfuse.observation.input", req.Message),
 		)
 		var perr error
 		planResult, perr = o.planner.Plan(pctx, planReq)
@@ -179,7 +179,7 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 		planJSON, _ := json.Marshal(planResult.Tasks)
 		pspan.SetAttr(
 			telemetry.IntAttr("task.count", len(planResult.Tasks)),
-			telemetry.StringAttr("langfuse.output", string(planJSON)),
+			telemetry.StringAttr("langfuse.observation.output", string(planJSON)),
 		)
 		pspan.End()
 	}
@@ -295,7 +295,7 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 
 	// -- Step 8: Evaluate -------------------------------------------------------
 	ectx, espan := o.tracer.Start(ctx, "dag.eval",
-		telemetry.StringAttr("langfuse.input", req.Message),
+		telemetry.StringAttr("langfuse.observation.input", req.Message),
 	)
 	eval, err := o.evaluator.Eval(ectx, GoEvalRequest{
 		SessionID:   req.SessionID,
@@ -309,7 +309,7 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 		espan.SetAttr(
 			telemetry.BoolAttr("eval.ok", eval.EvalOK),
 			telemetry.Float64Attr("eval.score", eval.Score),
-			telemetry.StringAttr("langfuse.output", eval.Summary),
+			telemetry.StringAttr("langfuse.observation.output", eval.Summary),
 		)
 	}
 	espan.End()
@@ -323,6 +323,8 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 			return o.runGeneration(ctx, req, gen+1, eval.Feedback)
 		}
 		score, reason := calculateConfidence(*eval, gen)
+		// Final generation exhausted — delete checkpoint rows immediately.
+		_ = o.checkpoint.DeleteSession(ctx, req.SessionID)
 		return &RunResult{
 			FinalOutput:      finalOutput,
 			ConfidenceScore:  score,
@@ -331,6 +333,8 @@ func (o *Orchestrator) runGeneration(ctx context.Context, req RunRequest, gen in
 		}, nil
 	}
 
+	// Success path — delete checkpoint rows immediately.
+	_ = o.checkpoint.DeleteSession(ctx, req.SessionID)
 	return &RunResult{
 		FinalOutput:      finalOutput,
 		ConfidenceScore:  eval.Score,
@@ -455,3 +459,4 @@ func (NoopCheckpoint) SaveTaskFailed(ctx context.Context, sessionID string, t *T
 func (NoopCheckpoint) LoadCompletedTasks(_ context.Context, _ string, _ int) (map[string]string, error) {
 	return map[string]string{}, nil
 }
+func (NoopCheckpoint) DeleteSession(_ context.Context, _ string) error { return nil }

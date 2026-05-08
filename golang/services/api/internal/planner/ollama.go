@@ -46,9 +46,9 @@ type chatResponse struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"message"`
-	Done               bool `json:"done"`
-	PromptEvalCount    int  `json:"prompt_eval_count"`
-	EvalCount          int  `json:"eval_count"`
+	Done            bool `json:"done"`
+	PromptEvalCount int  `json:"prompt_eval_count"`
+	EvalCount       int  `json:"eval_count"`
 }
 
 // Chat sends a chat request to Ollama.
@@ -66,7 +66,7 @@ func (c *OllamaClient) Chat(ctx context.Context, model string, messages []llm.Me
 		telemetry.StringAttr("gen_ai.system", "ollama"),
 		telemetry.IntAttr("llm.messages", len(messages)),
 		telemetry.BoolAttr("llm.structured", schema != nil),
-		telemetry.StringAttr("langfuse.input", inputText),
+		telemetry.StringAttr("langfuse.observation.input", inputText),
 	)
 	defer span.End()
 	body := chatRequest{
@@ -114,7 +114,7 @@ func (c *OllamaClient) Chat(ctx context.Context, model string, messages []llm.Me
 		telemetry.IntAttr("llm.response.bytes", len(result.Message.Content)),
 		telemetry.IntAttr("gen_ai.usage.input_tokens", result.PromptEvalCount),
 		telemetry.IntAttr("gen_ai.usage.output_tokens", result.EvalCount),
-		telemetry.StringAttr("langfuse.output", result.Message.Content),
+		telemetry.StringAttr("langfuse.observation.output", result.Message.Content),
 	)
 	return result.Message.Content, nil
 }
