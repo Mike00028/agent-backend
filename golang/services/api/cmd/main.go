@@ -18,6 +18,7 @@ import (
 	"github.com/mike00028/golang-backend/services/api/internal/llm"
 	"github.com/mike00028/golang-backend/services/api/internal/llm/gemini"
 	"github.com/mike00028/golang-backend/services/api/internal/mcptools"
+	"github.com/mike00028/golang-backend/services/api/internal/memory"
 	"github.com/mike00028/golang-backend/services/api/internal/planner"
 	"github.com/mike00028/golang-backend/services/api/internal/telemetry"
 	"github.com/mike00028/golang-backend/services/api/router"
@@ -33,6 +34,10 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config error", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Validate(); err != nil {
+		slog.Error("config validation failed", "error", err)
 		os.Exit(1)
 	}
 	gin.SetMode(cfg.GinMode)
@@ -65,6 +70,7 @@ func main() {
 	var chatStore *internaldb.ChatStore
 	var cp dag.CheckpointWriter = dag.NoopCheckpoint{}
 	var pgPool *pgAdapter
+	pgvectorOK := false
 	if cfg.PostgresDSN != "" {
 		var err error
 		pgPool, err = openPgPool(context.Background(), cfg.PostgresDSN)
@@ -79,6 +85,13 @@ func main() {
 			if err := internaldb.Migrate(cfg.PostgresDSN); err != nil {
 				slog.Error("db migration failed", "error", err)
 				os.Exit(1)
+			}
+
+			// Warn if pgvector is missing — memory will be disabled gracefully.
+			pgvectorOK = true
+			if err := internaldb.CheckPgvector(context.Background(), pgPool.pool); err != nil {
+				slog.Warn("pgvector not available — memory service will be disabled", "error", err)
+				pgvectorOK = false
 			}
 
 			chatStore = internaldb.NewChatStore(&chatDB{pool: pgPool.pool})
@@ -116,6 +129,16 @@ func main() {
 
 	hitlStore := hitl.NewStore()
 
+	// ── Memory service (semantic retrieval + write-back via pgvector) ─────────
+	var memorySvc *memory.Service
+	if pgPool != nil && pgvectorOK && cfg.EmbedModel != "" && cfg.OllamaBaseURL != "" {
+		memorySvc = memory.New(pgPool, cfg.OllamaBaseURL, cfg.EmbedModel)
+		slog.Info("memory service ready",
+			"embed_model", cfg.EmbedModel,
+			"ollama_url", cfg.OllamaBaseURL,
+		)
+	}
+
 	// ── LLM provider (DIP — Planner/Evaluator depend on llm.Client interface) ──
 	var llmClient llm.Client
 	switch cfg.LLMProvider {
@@ -132,7 +155,7 @@ func main() {
 	}
 
 	chatHandler := handler.NewChatHandler(
-		pool, cp, agentStore, nil,
+		pool, cp, agentStore, memorySvc,
 		hitlStore,
 		mcpMgr,
 		llmClient, cfg.PlannerModel, cfg.ChatModel, cfg.EvalModel,

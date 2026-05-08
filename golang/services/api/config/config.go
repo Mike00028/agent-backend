@@ -99,6 +99,15 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// Validate checks that combinations of settings are coherent.
+// Call after Load() in main before constructing any services.
+func (c Config) Validate() error {
+	if c.PostgresDSN != "" && c.OllamaBaseURL == "" {
+		return fmt.Errorf("OLLAMA_BASE_URL is required when POSTGRES_DSN is set (needed for memory embeddings)")
+	}
+	return nil
+}
+
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

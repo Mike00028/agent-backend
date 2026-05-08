@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // pgx5DSN converts a postgres:// DSN to the pgx5:// scheme golang-migrate requires.
@@ -68,6 +70,24 @@ func RollbackAll(dsn string) error {
 	defer m.Close()
 	if err := m.Down(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("db.RollbackAll: %w", err)
+	}
+	return nil
+}
+
+// CheckPgvector verifies the vector extension is installed in the database.
+// Returns a descriptive error if missing so the caller can disable memory
+// gracefully instead of letting embedding queries fail silently at runtime.
+func CheckPgvector(ctx context.Context, pool *pgxpool.Pool) error {
+	var exists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_extension WHERE extname = 'vector'
+		)`).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("pgvector probe failed: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("pgvector extension is not installed; run: CREATE EXTENSION IF NOT EXISTS vector")
 	}
 	return nil
 }
