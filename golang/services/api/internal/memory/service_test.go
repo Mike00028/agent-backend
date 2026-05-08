@@ -23,9 +23,9 @@ type mockRows struct {
 	err  error
 }
 
-func (m *mockRows) Next() bool        { m.idx++; return m.idx <= len(m.data) }
-func (m *mockRows) Close()            {}
-func (m *mockRows) Err() error        { return m.err }
+func (m *mockRows) Next() bool { m.idx++; return m.idx <= len(m.data) }
+func (m *mockRows) Close()     {}
+func (m *mockRows) Err() error { return m.err }
 func (m *mockRows) Scan(dst ...any) error {
 	if len(dst) == 0 {
 		return nil
@@ -35,9 +35,9 @@ func (m *mockRows) Scan(dst ...any) error {
 }
 
 type mockDB struct {
-	rows     *mockRows
-	queryErr error
-	execErr  error
+	rows       *mockRows
+	queryErr   error
+	execErr    error
 	execCalled bool
 }
 

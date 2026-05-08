@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"time"
@@ -107,6 +108,24 @@ func main() {
 		embedder := mcptools.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.EmbedModel)
 		mcpMgr = mcptools.NewManager(mcpStore, embedder)
 		defer mcpMgr.Close()
+
+		// Register MCP servers from MCP_SERVERS_JSON (JSON array of ServerConfig).
+		// The filesystem MCP server is a first-class example:
+		//   MCP_SERVERS_JSON='[{"name":"filesystem","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/workspace"]}]'
+		if cfg.MCPServersJSON != "" {
+			var servers []mcptools.ServerConfig
+			if err := json.Unmarshal([]byte(cfg.MCPServersJSON), &servers); err != nil {
+				slog.Warn("MCP_SERVERS_JSON parse failed — no MCP servers registered", "error", err)
+			} else {
+				for _, srv := range servers {
+					if err := mcpMgr.RegisterServer(context.Background(), srv); err != nil {
+						slog.Warn("mcp server registration failed", "server", srv.Name, "error", err)
+					} else {
+						slog.Info("mcp server registered", "server", srv.Name, "transport", srv.Transport)
+					}
+				}
+			}
+		}
 
 		// Start periodic tool sync (every 5 minutes)
 		mcpMgr.StartPeriodicSync(context.Background(), 5*time.Minute)

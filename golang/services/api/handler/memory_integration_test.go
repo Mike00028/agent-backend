@@ -21,10 +21,10 @@ func (memMockResult) RowsAffected() int64 { return 1 }
 
 type memMockRows struct{}
 
-func (m *memMockRows) Next() bool             { return false }
-func (m *memMockRows) Close()                 {}
-func (m *memMockRows) Err() error             { return nil }
-func (m *memMockRows) Scan(_ ...any) error    { return nil }
+func (m *memMockRows) Next() bool          { return false }
+func (m *memMockRows) Close()              {}
+func (m *memMockRows) Err() error          { return nil }
+func (m *memMockRows) Scan(_ ...any) error { return nil }
 
 type memMockDB struct {
 	execErr    error

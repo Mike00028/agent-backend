@@ -35,6 +35,10 @@ type Config struct {
 	// Postgres — conversations, MCP tools, agent registry (optional for local dev)
 	PostgresDSN string
 
+	// MCP servers — JSON array of mcptools.ServerConfig, loaded from MCP_SERVERS_JSON.
+	// Example: [{"name":"filesystem","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"]}]
+	MCPServersJSON string
+
 	// DAG orchestration tuning
 	RefinementMaxGeneration int
 	MessageBatchThreshold   int
@@ -68,9 +72,10 @@ func Load() (Config, error) {
 
 		AgentSystemPrompt: getEnv("AGENT_SYSTEM_PROMPT", "You are a helpful assistant."),
 		AgentMaxIter:      getEnvInt("AGENT_MAX_ITERATIONS", 3),
-		AgentTools:        strings.Fields(getEnv("AGENT_TOOLS", "chat_agent math_agent rag_agent summarize_agent text_agent")),
+		AgentTools:        strings.Fields(getEnv("AGENT_TOOLS", "chat_agent math_agent rag_agent summarize_agent text_agent mcp_agent")),
 
-		PostgresDSN: getEnv("POSTGRES_DSN", ""),
+		PostgresDSN:      getEnv("POSTGRES_DSN", ""),
+		MCPServersJSON:   getEnv("MCP_SERVERS_JSON", ""),
 
 		RefinementMaxGeneration: getEnvInt("REFINEMENT_MAX_GENERATION", 2),
 		MessageBatchThreshold:   getEnvInt("MESSAGE_BATCH_THRESHOLD", 15),
