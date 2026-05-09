@@ -21,6 +21,7 @@ import (
 	"github.com/mike00028/golang-backend/services/api/internal/mcptools"
 	"github.com/mike00028/golang-backend/services/api/internal/memory"
 	"github.com/mike00028/golang-backend/services/api/internal/planner"
+	"github.com/mike00028/golang-backend/services/api/internal/subagent"
 	"github.com/mike00028/golang-backend/services/api/internal/telemetry"
 	"github.com/mike00028/golang-backend/services/api/router"
 )
@@ -158,6 +159,27 @@ func main() {
 		)
 	}
 
+	// ── Subagent service (upload/search/CRUD for user agents + workflows) ─────
+	var subagentSvc *subagent.Service
+	if pgPool != nil {
+		subagentStore := subagent.NewStore(pgPool.pool)
+		// Reuse the mcptools embedder if available (same interface).
+		// Embedder is pluggable; nil embedder falls back to keyword-only search.
+		var embedderForSubagent subagent.Embedder
+		if cfg.EmbedModel != "" && cfg.OllamaBaseURL != "" {
+			embedderForSubagent = mcptools.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.EmbedModel)
+		}
+		subagentSvc = subagent.NewService(subagentStore, embedderForSubagent)
+		slog.Info("subagent service ready",
+			"embedder", func() string {
+				if embedderForSubagent != nil {
+					return "ollama"
+				}
+				return "none"
+			}(),
+		)
+	}
+
 	// ── LLM provider (DIP — Planner/Evaluator depend on llm.Client interface) ──
 	var llmClient llm.Client
 	switch cfg.LLMProvider {
@@ -177,6 +199,7 @@ func main() {
 		pool, cp, agentStore, memorySvc,
 		hitlStore,
 		mcpMgr,
+		subagentSvc,
 		llmClient, cfg.PlannerModel, cfg.ChatModel, cfg.EvalModel,
 	)
 	approveHandler := handler.NewApproveHandler(hitlStore)

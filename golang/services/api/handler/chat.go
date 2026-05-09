@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,7 @@ import (
 	"github.com/mike00028/golang-backend/services/api/internal/memory"
 	"github.com/mike00028/golang-backend/services/api/internal/planner"
 	pkgsse "github.com/mike00028/golang-backend/services/api/internal/sse"
+	"github.com/mike00028/golang-backend/services/api/internal/subagent"
 	"github.com/mike00028/golang-backend/services/api/internal/telemetry"
 )
 
@@ -38,16 +40,17 @@ type chatRequest struct {
 
 // ChatHandler drives DAG execution and streams results as SSE.
 type ChatHandler struct {
-	pool       *grpcclient.Pool
-	checkpoint dag.CheckpointWriter
-	agentStore *agentstore.Store
-	memorySvc  *memory.Service
-	hitlStore  *hitl.Store
-	mcpMgr     *mcptools.Manager
-	llmClient  llm.Client
-	planModel  string
-	chatModel  string // tool execution: chat_agent, summarize_agent
-	evalModel  string
+	pool          *grpcclient.Pool
+	checkpoint    dag.CheckpointWriter
+	agentStore    *agentstore.Store
+	memorySvc     *memory.Service
+	hitlStore     *hitl.Store
+	mcpMgr        *mcptools.Manager
+	subagentSvc   *subagent.Service // for parallel discovery of user subagents
+	llmClient     llm.Client
+	planModel     string
+	chatModel     string // tool execution: chat_agent, summarize_agent
+	evalModel     string
 }
 
 // NewChatHandler creates a ChatHandler.
@@ -58,20 +61,22 @@ func NewChatHandler(
 	memorySvc *memory.Service,
 	hitlStore *hitl.Store,
 	mcpMgr *mcptools.Manager,
+	subagentSvc *subagent.Service,
 	client llm.Client,
 	planModel, chatModel, evalModel string,
 ) *ChatHandler {
 	return &ChatHandler{
-		pool:       pool,
-		checkpoint: cp,
-		agentStore: agentStore,
-		memorySvc:  memorySvc,
-		hitlStore:  hitlStore,
-		mcpMgr:     mcpMgr,
-		llmClient:  client,
-		planModel:  planModel,
-		chatModel:  chatModel,
-		evalModel:  evalModel,
+		pool:          pool,
+		checkpoint:    cp,
+		agentStore:    agentStore,
+		memorySvc:     memorySvc,
+		hitlStore:     hitlStore,
+		mcpMgr:        mcpMgr,
+		subagentSvc:   subagentSvc,
+		llmClient:     client,
+		planModel:     planModel,
+		chatModel:     chatModel,
+		evalModel:     evalModel,
 	}
 }
 
@@ -250,7 +255,8 @@ func (h *ChatHandler) normalise(c *gin.Context, req *chatRequest) {
 }
 
 // buildRunRequest loads the agent spec from DB, fetches memory context,
-// and returns a fully-populated dag.RunRequest.
+// and performs parallel discovery of subagents for the planner.
+// Returns a fully-populated dag.RunRequest with both built-in and user subagents.
 func (h *ChatHandler) buildRunRequest(ctx context.Context, req chatRequest) (dag.RunRequest, *agentstore.AgentSpec, error) {
 	// -- Load agent spec from DB (security boundary) --------------------------
 	spec, err := h.agentStore.Load(ctx, req.AgentID, req.UserID)
@@ -258,10 +264,46 @@ func (h *ChatHandler) buildRunRequest(ctx context.Context, req chatRequest) (dag
 		return dag.RunRequest{}, nil, fmt.Errorf("agent %q: %w", req.AgentID, err)
 	}
 
-	// -- Fetch semantic memory context ----------------------------------------
-	memCtx := ""
-	if h.memorySvc != nil && spec.MemoryPolicy.TopKRead > 0 {
-		memCtx = h.memorySvc.Retrieve(ctx, req.UserID, req.Message, spec.MemoryPolicy.TopKRead)
+	// -- Parallel discovery: memory context + subagent discovery ---------------
+	// Both operations are independent and can run concurrently for low latency.
+	var wg sync.WaitGroup
+	var memCtx string
+	var discoveryResult *subagent.DiscoveryResult
+
+	// Fetch semantic memory context (if enabled)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if h.memorySvc != nil && spec.MemoryPolicy.TopKRead > 0 {
+			memCtx = h.memorySvc.Retrieve(ctx, req.UserID, req.Message, spec.MemoryPolicy.TopKRead)
+		}
+	}()
+
+	// Discover subagents via hybrid search (all agents matching user query)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if h.subagentSvc != nil {
+			// 500ms timeout for discovery (keep latency low even if DB is slow)
+			discoveryResult, _ = h.subagentSvc.Discover(ctx, subagent.DiscoverRequest{
+				Query:       req.Message,
+				UserID:      req.UserID,
+				SearchLimit: 10,
+				TimeoutMS:   500,
+			})
+		}
+	}()
+
+	wg.Wait()
+
+	// -- Build agent spec JSON with discovered subagents -----------------------
+	// Merge built-in agents (static registry) with discovered user subagents.
+	agentSpecJSON := spec.ToSpecJSON()
+	if discoveryResult != nil && len(discoveryResult.SubAgents) > 0 {
+		// Embed discovered subagents into the planner context
+		discoveredJSON := discoveryResult.ToAgentSpecJSON()
+		// Merge: combine sub_agents arrays if both exist
+		agentSpecJSON = mergeAgentSpecs(agentSpecJSON, discoveredJSON)
 	}
 
 	return dag.RunRequest{
@@ -269,7 +311,7 @@ func (h *ChatHandler) buildRunRequest(ctx context.Context, req chatRequest) (dag
 		UserID:        req.UserID,
 		AgentID:       req.AgentID,
 		Message:       req.Message,
-		AgentSpecJSON: spec.ToSpecJSON(),
+		AgentSpecJSON: agentSpecJSON,
 		MemoryContext: memCtx,
 	}, spec, nil
 }
@@ -532,4 +574,23 @@ func httpError(c *gin.Context, ae *apperror.AppError) {
 		"code":    string(ae.Code),
 		"message": ae.Message,
 	})
+}
+
+// mergeAgentSpecs combines discovered sub_agents with built-in agents in the planner context.
+// Parses both JSON specs, merges sub_agents arrays, and returns the combined JSON.
+// If either JSON is empty or malformed, falls back to the non-empty/valid one.
+func mergeAgentSpecs(builtInJSON, discoveredJSON string) string {
+	type spec struct {
+		SubAgents []map[string]interface{} `json:"sub_agents"`
+	}
+
+	var builtIn, discovered spec
+	_ = json.Unmarshal([]byte(builtInJSON), &builtIn)
+	_ = json.Unmarshal([]byte(discoveredJSON), &discovered)
+
+	// Merge: combine both arrays (built-in first, then discovered)
+	builtIn.SubAgents = append(builtIn.SubAgents, discovered.SubAgents...)
+
+	merged, _ := json.Marshal(builtIn)
+	return string(merged)
 }
