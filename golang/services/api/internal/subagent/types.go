@@ -88,7 +88,6 @@ type SubAgentConfig struct {
 	// Workflow steps (for type: workflow)
 	Steps []WorkflowStep `json:"steps"`
 
-
 	// User-facing hints
 	InputHints string `json:"input_hints"`           // what input format the agent expects
 	Notes      string `json:"notes"`                 // deployment/limitation notes

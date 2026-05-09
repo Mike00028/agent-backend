@@ -295,7 +295,6 @@ func FlowiseFormat(content []byte) (*SubAgent, *SubAgentConfig, string, error) {
 		MaxTokens:     4096,
 		MaxIterations: 10,
 		Tools:         []string{},
-
 	}
 
 	agent = &SubAgent{

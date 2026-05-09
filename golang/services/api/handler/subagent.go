@@ -510,11 +510,11 @@ func (h *SubAgentHandler) Validate(c *gin.Context) {
 
 	if len(errors) == 0 && agent != nil && config != nil {
 		result["parsed"] = gin.H{
-			"name":          agent.Name,
-			"description":   agent.Description,
-			"type":          agent.Type,
-			"config":        config,
-			"schema_hash":   schemaHash,
+			"name":           agent.Name,
+			"description":    agent.Description,
+			"type":           agent.Type,
+			"config":         config,
+			"schema_hash":    schemaHash,
 			"embedding_hint": subagent.EmbeddingHint(agent, config),
 		}
 	}
@@ -658,17 +658,17 @@ func (h *SubAgentHandler) GetSchema(c *gin.Context) {
 
 func (h *SubAgentHandler) formatSubAgentResponse(agent *subagent.SubAgent, includeContent bool) gin.H {
 	resp := gin.H{
-		"id":                agent.ID,
-		"name":              agent.Name,
-		"description":       agent.Description,
-		"type":              string(agent.Type),
-		"source_format":     string(agent.SourceFormat),
-		"is_shared":         agent.IsShared,
-		"is_enabled":        agent.IsEnabled,
-		"tags":              agent.Tags,
-		"category":          agent.Category,
-		"created_at":        agent.CreatedAt,
-		"updated_at":        agent.UpdatedAt,
+		"id":            agent.ID,
+		"name":          agent.Name,
+		"description":   agent.Description,
+		"type":          string(agent.Type),
+		"source_format": string(agent.SourceFormat),
+		"is_shared":     agent.IsShared,
+		"is_enabled":    agent.IsEnabled,
+		"tags":          agent.Tags,
+		"category":      agent.Category,
+		"created_at":    agent.CreatedAt,
+		"updated_at":    agent.UpdatedAt,
 	}
 
 	if agent.DeprecatedAt != nil {
@@ -689,15 +689,15 @@ func (h *SubAgentHandler) formatSubAgentResponse(agent *subagent.SubAgent, inclu
 
 func (h *SubAgentHandler) formatSubAgentListItem(agent *subagent.SubAgent) gin.H {
 	return gin.H{
-		"id":           agent.ID,
-		"name":         agent.Name,
-		"description":  agent.Description,
-		"type":         string(agent.Type),
-		"is_shared":    agent.IsShared,
-		"is_enabled":   agent.IsEnabled,
-		"tags":         agent.Tags,
-		"category":     agent.Category,
-		"created_at":   agent.CreatedAt,
-		"updated_at":   agent.UpdatedAt,
+		"id":          agent.ID,
+		"name":        agent.Name,
+		"description": agent.Description,
+		"type":        string(agent.Type),
+		"is_shared":   agent.IsShared,
+		"is_enabled":  agent.IsEnabled,
+		"tags":        agent.Tags,
+		"category":    agent.Category,
+		"created_at":  agent.CreatedAt,
+		"updated_at":  agent.UpdatedAt,
 	}
 }

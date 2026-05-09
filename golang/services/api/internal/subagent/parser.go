@@ -64,11 +64,11 @@ func ParseAgentsMD(content []byte) (*SubAgent, *SubAgentConfig, string, error) {
 			MaxRetries *int     `yaml:"max_retries"`
 			RetryDelay *string  `yaml:"retry_delay"`
 		} `yaml:"guardrails"`
-		SystemPrompt string          `yaml:"system_prompt"`
-		Steps        []interface{}   `yaml:"steps"`
-		Tags         []string        `yaml:"tags"`
-		Category     string                   `yaml:"category"`
-		Version      *int                     `yaml:"version"`
+		SystemPrompt string        `yaml:"system_prompt"`
+		Steps        []interface{} `yaml:"steps"`
+		Tags         []string      `yaml:"tags"`
+		Category     string        `yaml:"category"`
+		Version      *int          `yaml:"version"`
 	}
 
 	if err := yaml.Unmarshal(yamlContent, &frontmatter); err != nil {

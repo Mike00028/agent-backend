@@ -34,12 +34,12 @@ func NewService(store Store, embedder Embedder) *Service {
 
 // IngestRequest is the input to Ingest().
 type IngestRequest struct {
-	OwnerID  string      // user uploading the agent
-	Content  []byte      // raw file content (agents.md or Flowise JSON)
+	OwnerID  string       // user uploading the agent
+	Content  []byte       // raw file content (agents.md or Flowise JSON)
 	Format   SourceFormat // detected format
-	Shared   bool        // visibility flag
-	Tags     []string    // optional tags
-	Category string      // optional category
+	Shared   bool         // visibility flag
+	Tags     []string     // optional tags
+	Category string       // optional category
 }
 
 // IngestResult is the output of Ingest().
@@ -208,7 +208,7 @@ func (s *Service) Get(ctx context.Context, req *GetRequest) (*SubAgent, error) {
 
 // ListRequest is the input to List().
 type ListRequest struct {
-	UserID string
+	UserID  string
 	Filters *ListFilters
 }
 
@@ -257,10 +257,10 @@ func (s *Service) GetByID(ctx context.Context, req *GetByIDRequest) (*SubAgent, 
 
 // SearchRequest is the input to Search().
 type SearchRequest struct {
-	UserID string   // user performing search
-	Query  string   // search text
-	Limit  int      // max results
-	Tags   []string // optional tag filters
+	UserID string        // user performing search
+	Query  string        // search text
+	Limit  int           // max results
+	Tags   []string      // optional tag filters
 	Type   *SubAgentType // optional type filter
 }
 
