@@ -290,12 +290,16 @@ func (s *Service) Search(ctx context.Context, req *SearchRequest) ([]SearchResul
 	}
 
 	// Query store with vector + text
+	var agentType SubAgentType
+	if req.Type != nil {
+		agentType = *req.Type
+	}
 	searchQuery := &SearchQuery{
 		UserID: req.UserID,
 		Query:  req.Query,
 		Vector: queryVec,
 		Tags:   req.Tags,
-		Type:   *req.Type,
+		Type:   agentType,
 		Limit:  req.Limit,
 	}
 
